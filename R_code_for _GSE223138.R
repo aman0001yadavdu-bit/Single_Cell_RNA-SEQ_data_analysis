@@ -147,3 +147,135 @@ if (!is.na(diag_col_idx)) {
 names(disease_map) <- sample_meta$geo_accession
 # Ensure the data directory exists BEFORE saving the CSV
 cat("✔ Download complete.\n\n")
+
+ # ── USER SETTINGS (OPTIMIZED COMPROMISE) ──
+GEO_ACCESSION <- "GSE184950"
+N_CORES       <- 10
+
+MIN_FEATURES  <- 300    # Your chosen floor
+MAX_FEATURES  <- 3000   # Your conservative doublet filter
+
+MIN_COUNTS    <- 500    # Your chosen signal floor
+
+MAX_MT        <- 50     # Standard limit for healthy brain nuclei
+CHOSEN_RES    <- 0.6    # look at results/clustering/01_umap_all_resolutions.pdf
+# and change this if needed before re-running clustering
+                           
+                            
+# ================================================================================
+#  STEP 2: LOAD DATA + QUALITY CONTROL
+# ================================================================================
+cat("━━━ STEP 2: Load Data + QC ━━━\n")
+
+# Get the names of the 34 folders we created in Step 1
+prefixes <- list.dirs("data", full.names=FALSE, recursive=FALSE)
+if (length(prefixes) == 0) stop("No folders found in 'data'. Did Step 1 finish?")
+
+seurat_raw <- list()
+
+for (pfx in prefixes) {
+  sdir  <- file.path("data", pfx)
+  
+  # Extract the GSM ID (e.g., "GSM5602315") and the short name (e.g., "A10")
+  parts  <- strsplit(pfx, "_")[[1]]
+  gsm_id <- parts[1]
+  sname  <- ifelse(length(parts) > 1, parts[2], gsm_id)
+  
+  cat("  Loading:", sname, "...")
+  
+  tryCatch({
+    counts <- Read10X(data.dir=sdir)
+    if (is.list(counts)) counts <- counts[[1]]
+    
+    # Create the raw Seurat object
+    obj <- CreateSeuratObject(counts=counts, project=sname,
+                              min.cells=3, min.features=200)
+    
+    # ── THE MAGIC: Apply the perfect labels we just verified ──
+    obj$sample  <- sname
+    obj$gsm_id  <- gsm_id
+    
+    # Match the GSM ID to our disease_map from Step 1
+    if (gsm_id %in% names(disease_map)) {
+      obj$disease <- disease_map[[gsm_id]]
+    } else {
+      obj$disease <- "Unknown"
+      cat(" ⚠ Label missing!")
+    }
+    
+    seurat_raw[[sname]] <- obj
+    cat(" ✔", ncol(obj), "cells |", obj$disease[1], "\n")
+  }, error=function(e) cat(" ✘ FAILED:", e$message, "\n"))
+}
+
+# Print the overall breakdown
+cat("\n  Total raw cells loaded:", sum(sapply(seurat_raw, ncol)), "\n")
+cat("  Disease breakdown across all cells:\n")
+print(table(sapply(seurat_raw, function(x) x$disease[1])))
+
+# ── QC METRICS & PLOTTING ───────────────────────────────────────────────────
+cat("\n  Calculating QC metrics (Mitochondrial %)...\n")
+
+# Calculate Mitochondrial %
+seurat_raw <- lapply(seurat_raw, function(seu) {
+  seu[["percent.mt"]] <- PercentageFeatureSet(seu, pattern="^MT-"); seu
+})
+
+# Create results folders
+dir.create("results/qc", recursive=TRUE, showWarnings=FALSE)
+
+# Combine briefly just for the "Before" plot
+all_raw <- merge(seurat_raw[[1]], y=seurat_raw[-1], add.cell.ids=names(seurat_raw))
+
+pdf("results/qc/01_combined_violin_before.pdf", width=14, height=5)
+print(VlnPlot(all_raw, features=c("nFeature_RNA","nCount_RNA","percent.mt"),
+              ncol=3, pt.size=0, group.by="orig.ident") +
+        plot_annotation(title="QC — All Samples BEFORE Filtering",
+                        theme=theme(plot.title=element_text(face="bold"))))
+dev.off()
+cat("  ✔ Saved: results/qc/01_combined_violin_before.pdf\n")
+
+# ── FILTERING ───────────────────────────────────────────────────────────────
+# Note: Using your thresholds defined at the top of your script
+cat(sprintf("\n  Filtering: genes %d–%d | MT <%.0f%% | counts >%d\n",
+            MIN_FEATURES, MAX_FEATURES, MAX_MT, MIN_COUNTS))
+
+seurat_filtered <- lapply(seurat_raw, function(seu) {
+  subset(seu, subset = nFeature_RNA > MIN_FEATURES &
+           nFeature_RNA < MAX_FEATURES &
+           percent.mt   < MAX_MT       &
+           nCount_RNA   > MIN_COUNTS)
+})
+
+# ── FILTERING SUMMARY ───────────────────────────────────────────────────────
+qc_df <- data.frame(
+  sample       = names(seurat_filtered),
+  disease      = sapply(seurat_filtered, function(x) x$disease[1]),
+  cells_before = sapply(seurat_raw,      ncol),
+  cells_after  = sapply(seurat_filtered, ncol),
+  median_genes = sapply(seurat_filtered, function(x) round(median(x$nFeature_RNA))),
+  median_mt    = sapply(seurat_filtered, function(x) round(median(x$percent.mt),1))
+)
+
+cat("\n  --- After QC Summary ---\n")
+print(head(qc_df))
+write.csv(qc_df,"results/qc/qc_summary.csv", row.names=FALSE)
+
+# Plot "After" QC
+all_filt <- merge(seurat_filtered[[1]], y=seurat_filtered[-1], add.cell.ids=names(seurat_filtered))
+
+pdf("results/qc/03_combined_violin_after.pdf", width=14, height=5)
+print(VlnPlot(all_filt, features=c("nFeature_RNA","nCount_RNA","percent.mt"),
+              ncol=3, pt.size=0, group.by="orig.ident") +
+        plot_annotation(title="QC — All Samples AFTER Filtering",
+                        theme=theme(plot.title=element_text(face="bold"))))
+dev.off()
+cat("  ✔ Saved: results/qc/03_combined_violin_after.pdf\n")
+
+# Save the checkpoint
+dir.create("objects", showWarnings=FALSE)
+saveRDS(seurat_filtered,"objects/01_seurat_qc.rds")
+
+cat(sprintf("\n✔ Step 2 QC Complete! Total cells surviving QC: %d\n\n",
+            sum(sapply(seurat_filtered, ncol))))
+
