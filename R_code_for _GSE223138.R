@@ -475,3 +475,123 @@ gc()
 # or bhi cheeje hatani hai yaha par RAM free kanre ke liye 
 
 
+# ================================================================================
+#  STEP 6: MERGE + HARMONY INTEGRATION
+#  Corrects batch effects between the 12 samples
+# ================================================================================
+cat("━━━ STEP 6: Merge + Harmony Integration ━━━\n")
+
+# Find shared variable genes
+features <- SelectIntegrationFeatures(object.list=seurat_norm, nfeatures=3000)
+
+# Merge
+merged <- merge(seurat_norm[[1]], y=seurat_norm[-1],
+                add.cell.ids=names(seurat_norm))
+VariableFeatures(merged) <- features
+cat("  Merged:", ncol(merged), "cells from", length(seurat_norm), "samples\n")
+
+# Confirm disease column survived merge
+if (!"disease" %in% colnames(merged@meta.data) ||
+    all(is.na(merged$disease))) {
+  cat("  Re-attaching disease labels from metadata...\n")
+  # Map via orig.ident → sname → disease
+  disease_by_sname <- sapply(seurat_norm, function(x) x$disease[1])
+  merged$disease   <- disease_by_sname[merged$orig.ident]
+}
+cat("  Disease groups:\n"); print(table(merged$disease))
+
+
+######## RAM CLEAN TIME ( IT'S IMPORTANT BABY)###########
+rm(seurat_norm)
+gc()
+
+
+
+# NEW FIX: Scale the merged data AND apply regression here, right before PCA!
+cat("  Scaling merged data and regressing noise...\n")
+merged <- ScaleData(merged, 
+                    vars.to.regress = c("percent.mt", "S.Score", "G2M.Score"), 
+                    verbose=FALSE)
+
+# PCA
+merged <- RunPCA(merged, npcs=50, verbose=FALSE)
+# UMAP before integration
+m_before <- RunUMAP(merged, dims=1:20, verbose=FALSE) %>%
+  FindNeighbors(dims=1:20, verbose=FALSE) %>%
+  FindClusters(resolution=0.5, verbose=FALSE)
+
+pdf("results/integration/01_umap_before_integration.pdf", width=14, height=6)
+p1 <- DimPlot(m_before, group.by="orig.ident", pt.size=0.3) +
+  ggtitle("BEFORE Integration — by Sample") + theme_classic()
+p2 <- DimPlot(m_before, group.by="disease", pt.size=0.3,
+              cols=c(Healthy_Control="steelblue",
+                     Parkinsons_Disease="firebrick")) +
+  ggtitle("BEFORE Integration — HC vs PD") + theme_classic()
+print(p1 + p2)
+dev.off()
+cat("  ✔ Saved: results/integration/01_umap_before_integration.pdf\n")
+
+
+######## RAM CLEAN TIME ( IT'S IMPORTANT BABY)###########
+rm(m_before)
+gc()
+
+
+
+# Harmony
+cat("  Running Harmony...\n")
+merged <- RunHarmony(merged, group.by.vars="orig.ident",
+                     plot_convergence=FALSE, verbose=FALSE)
+
+# Build UMAP from Harmony embeddings
+merged <- RunUMAP(merged, reduction="harmony", dims=1:20,
+                  verbose=FALSE, reduction.name="umap") %>%
+  FindNeighbors(reduction="harmony", dims=1:20, verbose=FALSE) %>%
+  FindClusters(resolution=0.5, verbose=FALSE)
+
+pdf("results/integration/02_umap_after_integration.pdf", width=14, height=6)
+p1 <- DimPlot(merged, group.by="orig.ident", pt.size=0.3) +
+  ggtitle("AFTER Integration — by Sample") + theme_classic()
+p2 <- DimPlot(merged, group.by="disease", pt.size=0.3,
+              cols=c(Healthy_Control="steelblue",
+                     Parkinsons_Disease="firebrick")) +
+  ggtitle("AFTER Integration — HC vs PD") + theme_classic()
+print(p1 + p2)
+dev.off()
+cat("  ✔ Saved: results/integration/02_umap_after_integration.pdf\n")
+
+
+
+## check point###############################################
+# Create the folder first just in case
+if (!dir.exists("objects")) dir.create("objects")
+
+# Save the object
+saveRDS(merged, file = "objects/merged.rds")
+
+cat("✔ File saved successfully to objects/merged.rds\n")
+
+# ── FIX 5: LISI on Harmony embeddings (correct space) ────────────────────────
+cat("  Computing LISI on Harmony embeddings (correct space)...\n")
+tryCatch({
+  harm_emb  <- Embeddings(merged, "harmony")   # ← FIXED: was "umap" before
+  meta_lisi <- data.frame(sample  = merged$orig.ident,
+                          disease = merged$disease,
+                          row.names=colnames(merged))
+  lisi_res  <- compute_lisi(harm_emb, meta_lisi, c("sample","disease"))
+  lisi_out  <- data.frame(
+    metric     = c("Sample LISI  (>1.5 = good mixing)",
+                   "Disease LISI (~1.0 = biology preserved)"),
+    mean_score = c(round(mean(lisi_res$sample,  na.rm=TRUE),3),
+                   round(mean(lisi_res$disease, na.rm=TRUE),3)))
+  write.csv(lisi_out,"results/integration/lisi_scores.csv", row.names=FALSE)
+  cat("  LISI scores:\n"); print(lisi_out)
+  cat("  ✔ Saved: results/integration/lisi_scores.csv\n")
+}, error=function(e) cat("  ⚠ LISI skipped:", e$message, "\n"))
+
+write.csv(as.data.frame(table(merged$orig.ident)),
+          "results/integration/cells_per_sample.csv", row.names=FALSE)
+############# CHECKPOINT ############
+
+saveRDS(merged,"objects/03_seurat_integrated.rds")
+cat(sprintf("✔ Integration done. Total cells: %d\n\n", ncol(merged)))
