@@ -378,6 +378,97 @@ dev.off()
 cat("✔ Cell cycle scoring done.\n\n")
 
 
+           
+# ================================================================================
+#  STEP 4: CELL CYCLE SCORING
+#  Cell cycle phases can drive clustering — we score and regress them out
+# ================================================================================
+cat("━━━ STEP 4: Cell Cycle Scoring ━━━\n")
+
+s_genes   <- cc.genes.updated.2019$s.genes
+g2m_genes <- cc.genes.updated.2019$g2m.genes
+
+seurat_clean <- lapply(seurat_clean, function(seu) {
+  seu <- NormalizeData(seu, verbose=FALSE)
+  tryCatch({
+    seu <- CellCycleScoring(seu, s.features=s_genes,
+                            g2m.features=g2m_genes, set.ident=FALSE)
+    seu
+  }, error=function(e) {
+    seu$S.Score <- 0; seu$G2M.Score <- 0; seu$Phase <- "Unknown"; seu
+  })
+})
+
+pdf("results/cellcycle/01_cell_cycle_phases.pdf", width=12, height=5)
+for (s in names(seurat_clean)) {
+  tryCatch({
+    df <- as.data.frame(table(seurat_clean[[s]]$Phase))
+    print(ggplot(df, aes(x=Var1, y=Freq, fill=Var1)) +
+            geom_bar(stat="identity") +
+            scale_fill_manual(values=c(G1="steelblue",G2M="firebrick",
+                                       S="forestgreen",Unknown="grey")) +
+            ggtitle(paste("Cell Cycle —",s)) +
+            xlab("Phase") + ylab("Cells") + theme_classic() + NoLegend())
+  }, error=function(e) NULL)
+}
+dev.off()
+cat("✔ Cell cycle scoring done.\n\n")
+
+
+
+
+
+
+
+
+
+# ================================================================================
+#  STEP 5: NORMALIZATION (Log-norm per sample)
+#  FIX 4: Using log-normalization + Harmony only
+#  NOT SCTransform + Harmony (which over-stacks corrections)
+#  SCTransform is good but should not be combined with Harmony
+#  Log-norm + Harmony is the standard validated approach
+# ================================================================================
+cat("━━━ STEP 5: Normalization (Log-norm per sample) ━━━\n")
+cat("  Using: Log-normalization + Harmony\n")
+cat("  Reason: SCT + Harmony stacks corrections — risks overcorrection\n\n")
+
+seurat_norm <- lapply(names(seurat_clean), function(s) {
+  cat("  Normalizing:", s, "...")
+  seu <- seurat_clean[[s]]
+  tryCatch({
+    # Normalize and find variable features ONLY (Scaling moved to Step 6)
+    seu <- NormalizeData(seu, verbose=FALSE)
+    seu <- FindVariableFeatures(seu, nfeatures=3000, verbose=FALSE)
+    cat(" ✔\n")
+    seu
+  }, error=function(e) {
+    cat(" ⚠ Normalization failed\n")
+    seu
+  })
+})
+names(seurat_norm) <- names(seurat_clean)
+cat("✔ Normalization done.\n\n")
+
+
+
+
+
+
+## check point###############################################
+# Create the folder first just in case
+if (!dir.exists("objects")) dir.create("objects")
+
+# Save the object
+saveRDS(seurat_norm, file = "objects/seurat_norm.rds")
+
+cat("✔ File saved successfully to objects/seurat_norm.rds\n")
+#############################################################
+
+
+
+
+
 
 # Run garbage collection to return about 11+ GB of RAM to your server
 gc()
