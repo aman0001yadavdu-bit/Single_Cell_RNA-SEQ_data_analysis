@@ -552,3 +552,199 @@ write.csv(as.data.frame(table(merged$orig.ident)),
 
 saveRDS(merged,"objects/03_seurat_integrated.rds")
 cat(sprintf("✔ Integration done. Total cells: %d\n\n", ncol(merged)))
+
+
+
+
+
+# ================================================================================
+#  STEP 7: ADAPTIVE PC SELECTION + FINAL UMAP
+# ================================================================================
+cat("━━━ STEP 7: Adaptive PC Selection ━━━\n")
+
+seu       <- merged
+pca_std   <- seu@reductions[["pca"]]@stdev
+
+# NEW FIX: Calculate the drop in variance between consecutive PCs (the "True Elbow")
+pct_var   <- (pca_std^2 / sum(pca_std^2)) * 100
+cumvar    <- cumsum(pct_var)
+
+# Find where the drop between consecutive PCs flattens out (change < 0.1%)
+diff_var  <- abs(diff(pct_var))
+elbow_pc  <- which(diff_var < 0.1)[1]
+
+# Safety fallback: if it doesn't flatten, default to 20 PCs
+if (is.na(elbow_pc)) elbow_pc <- 20 
+
+# Ensure we pick between 15 and 40 PCs to preserve complex biology
+N_PCS     <- min(40, max(15, elbow_pc))
+
+cat(sprintf("  Elbow detected at PC %d\n", elbow_pc))
+cat(sprintf("  ✔ Using %d PCs (adaptive — consecutive drop < 0.1%%)\n\n", N_PCS))
+
+# Elbow + cumulative variance plot (Updated for True Elbow Method)
+elbow_df <- data.frame(PC=1:length(pca_std), StdDev=pca_std, CumVar=cumvar)
+pdf("results/processing/01_elbow_plot.pdf", width=12, height=5)
+
+p1 <- ggplot(elbow_df, aes(x=PC, y=StdDev)) +
+  geom_line(color="steelblue") + geom_point(size=2, color="steelblue") +
+  geom_vline(xintercept=N_PCS, linetype="dashed", color="red") +
+  annotate("text", x=N_PCS+1.5, y=max(pca_std)*0.85,
+           label=paste0("Chosen PC: ", N_PCS), color="red", size=4, hjust=0) +
+  ggtitle("Elbow Plot (Drop < 0.1%)") + xlab("PC") + ylab("Std Dev") +
+  theme_classic(base_size=12) + theme(plot.title=element_text(face="bold"))
+
+p2 <- ggplot(elbow_df, aes(x=PC, y=CumVar)) +
+  geom_line(color="darkgreen", linewidth=1) +
+  geom_point(size=1.5, color="darkgreen") +
+  geom_vline(xintercept=N_PCS, linetype="dashed", color="red") +
+  annotate("text", x=N_PCS+1.5, y=min(cumvar) + 10,
+           label=sprintf("Cum. Var: %.1f%%", cumvar[N_PCS]), color="red", size=4, hjust=0) +
+  ggtitle("Cumulative Variance Explained") +
+  xlab("PC") + ylab("Cumulative %") +
+  theme_classic(base_size=12) + theme(plot.title=element_text(face="bold"))
+
+print(p1|p2)
+dev.off()
+cat("  ✔ Saved: results/processing/01_elbow_plot.pdf\n")
+
+# Recompute with adaptive PCs
+seu <- RunUMAP(seu, reduction="harmony", dims=1:N_PCS,
+               verbose=FALSE, reduction.name="umap") %>%
+  FindNeighbors(reduction="harmony", dims=1:N_PCS, verbose=FALSE)
+
+# QC overlay
+pdf("results/processing/02_umap_qc_overlay.pdf", width=14, height=12)
+p1 <- FeaturePlot(seu,"nFeature_RNA",pt.size=0.3) +
+  scale_color_viridis_c() + ggtitle("Genes per Cell") + theme_classic()
+p2 <- FeaturePlot(seu,"nCount_RNA",  pt.size=0.3) +
+  scale_color_viridis_c() + ggtitle("UMI Counts")    + theme_classic()
+p3 <- FeaturePlot(seu,"percent.mt",  pt.size=0.3) +
+  scale_color_viridis_c(option="inferno") + ggtitle("% MT") + theme_classic()
+p4 <- DimPlot(seu, group.by="disease", pt.size=0.3,
+              cols=c(Healthy_Control="steelblue",
+                     Parkinsons_Disease="firebrick")) +
+  ggtitle("HC vs PD") + theme_classic()
+print((p1|p2)/(p3|p4))
+dev.off()
+cat("  ✔ Saved: results/processing/02_umap_qc_overlay.pdf\n")
+
+# Cell cycle on UMAP
+if ("Phase" %in% colnames(seu@meta.data)) {
+  pdf("results/cellcycle/02_cell_cycle_umap.pdf", width=8, height=6)
+  print(DimPlot(seu, group.by="Phase", pt.size=0.3,
+                cols=c(G1="steelblue",G2M="firebrick",
+                       S="forestgreen",Unknown="grey")) +
+          ggtitle("Cell Cycle Phase on UMAP\n(should not cluster separately)") +
+          theme_classic())
+  dev.off()
+}
+
+
+
+
+
+
+write.csv(seu@meta.data,"results/processing/cell_metadata.csv")
+saveRDS(seu,"objects/04_seurat_processed.rds")
+cat(sprintf("✔ Processing done. Cells: %d | PCs: %d\n\n", ncol(seu), N_PCS))
+
+
+gc()
+
+
+
+
+
+
+#  RAM CLEANING =======
+# Create the objects directory if it doesn't exist
+if (!dir.exists("objects")) dir.create("objects")
+
+# Save the integrated object (this is your master file)
+saveRDS(merged, "objects/07_integrated_checkpoint.rds")
+
+# Confirm it saved
+cat("✔ Step 7 Save Point created: objects/07_integrated_checkpoint.rds\n")
+
+#clean slate
+# Clear every single object from your environment
+rm(list = ls())
+
+# Force the server to reclaim the RAM
+gc()
+
+
+
+
+
+
+
+
+
+
+
+#fresh start
+# ==============================================================================
+#  MONDAY MORNING RELOAD: RESTORE FROM STEP 7 CHECKPOINT
+# ==============================================================================
+# 1. Load Essential Libraries
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+
+
+# 3. Load the Integrated Data from the Hard Drive (The "Sseuratave Point")
+if (file.exists("objects/07_integrated_checkpoint.rds")) {
+  cat("📂 Loading integrated object... please wait.\n")
+  seu <- readRDS("objects/07_integrated_checkpoint.rds")
+  cat("✔ Data Loaded successfully.\n")
+  
+  # 4. Join Layers for Seurat v5 (Crucial for Clustering & Markers)
+  if (as.numeric(substr(packageVersion("Seurat"), 1, 1)) >= 5) {
+    cat("⚙ Seurat v5 detected: Joining layers for Step 8...\n")
+    seu[["RNA"]] <- JoinLayers(seu[["RNA"]])
+  }
+  
+  # 5. Final Status Check
+  print(seu)
+  cat("\n🚀 READY FOR STEP 8: CLUSTERING\n")
+  
+} else {
+  stop("❌ Error: Checkpoint file not found in 'objects/' folder. Check your file path!")
+}
+# ==============================================================================
+# === UPDATED STARTUP ===
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(patchwork) # Added this so wrap_plots works!
+
+CHOSEN_RES <- 0.6
+N_CORES    <- 10
+N_PCS      <- 15  # Added this so your titles don't error out!
+
+seu <- readRDS("objects/07_integrated_checkpoint.rds")
+# ========================
+
+# 1. Join the layers (Crucial for markers later)
+seu[["RNA"]] <- JoinLayers(seu[["RNA"]])
+
+# 2. Re-build the Neighbors Graph (This fixes the 'graph.name' error)
+# Using your N_PCS = 15 that you just defined
+seu <- FindNeighbors(seu, 
+                     reduction = "harmony", 
+                     dims = 1:N_PCS, 
+                     verbose = FALSE)
+
+# 3. Double-check it exists
+print(Graphs(seu)) 
+# You should now see "RNA_snn" and "RNA_nn" in your console
+
+
+
+
+
+
+
+
