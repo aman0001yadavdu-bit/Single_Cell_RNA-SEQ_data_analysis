@@ -278,4 +278,75 @@ saveRDS(seurat_filtered,"objects/01_seurat_qc.rds")
 cat(sprintf("\n✔ Step 2 QC Complete! Total cells surviving QC: %d\n\n",
             sum(sapply(seurat_filtered, ncol))))
 
+# ================================================================================
+#  STEP 3: DOUBLET DETECTION (DoubletFinder)
+#  Doublets = two cells in one droplet — creates fake hybrid clusters
+# ================================================================================
+cat("━━━ STEP 3: Doublet Detection ━━━\n")
+
+seurat_clean <- list()
+for (s in names(seurat_filtered)) {
+  cat("  Sample:", s, "\n")
+  seu <- seurat_filtered[[s]]
+  
+  result <- tryCatch({
+    # ── FIX 7: no NormalizeData before — goes straight to standard workflow ────
+    seu <- NormalizeData(seu, verbose=FALSE) %>%
+      FindVariableFeatures(verbose=FALSE) %>%
+      ScaleData(verbose=FALSE) %>%
+      RunPCA(verbose=FALSE) %>%
+      RunUMAP(dims=1:20, verbose=FALSE) %>%
+      FindNeighbors(dims=1:20, verbose=FALSE) %>%
+      FindClusters(resolution=0.5, verbose=FALSE)
+    
+    dr    <- min(0.25, ncol(seu)/100000)
+    sweep <- paramSweep(seu, PCs=1:20, sct=FALSE)
+    stats <- summarizeSweep(sweep, GT=FALSE)
+    bcmvn <- find.pK(stats)
+    
+    # Safe pK extraction — avoids "cannot xtfrm data frames"
+    pK   <- as.numeric(as.character(
+      bcmvn[["pK"]][which.max(bcmvn[["BCmetric"]])] ))
+    nExp <- round(dr * ncol(seu) * (1 - modelHomotypic(seu$seurat_clusters)))
+    seu  <- doubletFinder(seu, PCs=1:20, pN=0.25, pK=pK,
+                          nExp=nExp, reuse.pANN=NULL, sct=FALSE)
+    df_col <- grep("DF.class", colnames(seu@meta.data), value=TRUE)[1]
+    seu$doublet_status <- seu@meta.data[[df_col]]
+    cat(sprintf("    ✔ Doublets: %d | Singlets: %d\n", 
+                sum(seu$doublet_status=="Doublet"),
+                sum(seu$doublet_status=="Singlet")))
+    seu
+  }, error=function(e) {
+    cat("  ⚠ DoubletFinder failed (", e$message,") — keeping all cells\n")
+    seu$doublet_status <- "Singlet"; seu
+  })
+  
+  # NEW FIX: Draw the plot BEFORE throwing away the doublets
+  p <- DimPlot(result, group.by="doublet_status", 
+               cols=c(Doublet="red", Singlet="grey80"), pt.size=0.5) +
+    ggtitle(paste("Doublets —", s)) + theme_classic()
+  
+  # Save the plot temporarily
+  if (!exists("doublet_plots")) doublet_plots <- list()
+  doublet_plots[[s]] <- p
+  
+  # NOW throw away the doublets
+  before <- ncol(result)
+  result <- subset(result, subset=doublet_status=="Singlet")
+  cat(sprintf("    Cells: %d → %d\n", before, ncol(result)))
+  seurat_clean[[s]] <- result
+}
+
+# Print the saved plots that still contain the red doublets
+pdf("results/doublet/01_doublet_umap.pdf", width=8, height=6)
+for (p in doublet_plots) print(p)
+dev.off()
+
+
+
+
+# Run garbage collection to return about 11+ GB of RAM to your server
+gc()
+# or bhi cheeje hatani hai yaha par RAM free kanre ke liye 
+
 
