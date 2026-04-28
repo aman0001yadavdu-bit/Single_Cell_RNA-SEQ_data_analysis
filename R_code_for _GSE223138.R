@@ -342,6 +342,7 @@ pdf("results/doublet/01_doublet_umap.pdf", width=8, height=6)
 for (p in doublet_plots) print(p)
 dev.off()
 
+
 # ================================================================================
 #  STEP 4: CELL CYCLE SCORING
 #  Cell cycle phases can drive clustering — we score and regress them out
@@ -376,46 +377,6 @@ for (s in names(seurat_clean)) {
 }
 dev.off()
 cat("✔ Cell cycle scoring done.\n\n")
-
-
-           
-# ================================================================================
-#  STEP 4: CELL CYCLE SCORING
-#  Cell cycle phases can drive clustering — we score and regress them out
-# ================================================================================
-cat("━━━ STEP 4: Cell Cycle Scoring ━━━\n")
-
-s_genes   <- cc.genes.updated.2019$s.genes
-g2m_genes <- cc.genes.updated.2019$g2m.genes
-
-seurat_clean <- lapply(seurat_clean, function(seu) {
-  seu <- NormalizeData(seu, verbose=FALSE)
-  tryCatch({
-    seu <- CellCycleScoring(seu, s.features=s_genes,
-                            g2m.features=g2m_genes, set.ident=FALSE)
-    seu
-  }, error=function(e) {
-    seu$S.Score <- 0; seu$G2M.Score <- 0; seu$Phase <- "Unknown"; seu
-  })
-})
-
-pdf("results/cellcycle/01_cell_cycle_phases.pdf", width=12, height=5)
-for (s in names(seurat_clean)) {
-  tryCatch({
-    df <- as.data.frame(table(seurat_clean[[s]]$Phase))
-    print(ggplot(df, aes(x=Var1, y=Freq, fill=Var1)) +
-            geom_bar(stat="identity") +
-            scale_fill_manual(values=c(G1="steelblue",G2M="firebrick",
-                                       S="forestgreen",Unknown="grey")) +
-            ggtitle(paste("Cell Cycle —",s)) +
-            xlab("Phase") + ylab("Cells") + theme_classic() + NoLegend())
-  }, error=function(e) NULL)
-}
-dev.off()
-cat("✔ Cell cycle scoring done.\n\n")
-
-
-
 
 
 
@@ -453,8 +414,6 @@ cat("✔ Normalization done.\n\n")
 
 
 
-
-
 ## check point###############################################
 # Create the folder first just in case
 if (!dir.exists("objects")) dir.create("objects")
@@ -464,8 +423,6 @@ saveRDS(seurat_norm, file = "objects/seurat_norm.rds")
 
 cat("✔ File saved successfully to objects/seurat_norm.rds\n")
 #############################################################
-
-
 
 
 
