@@ -148,20 +148,19 @@ names(disease_map) <- sample_meta$geo_accession
 # Ensure the data directory exists BEFORE saving the CSV
 cat("✔ Download complete.\n\n")
 
- # ── USER SETTINGS (OPTIMIZED COMPROMISE) ──
+# ── USER SETTINGS (OPTIMIZED COMPROMISE) ──
 GEO_ACCESSION <- "GSE184950"
 N_CORES       <- 10
 
 MIN_FEATURES  <- 300    # Your chosen floor
 MAX_FEATURES  <- 3000   # Your conservative doublet filter
 
-MIN_COUNTS    <- 500    # Your chosen signal floor
+MIN_COUNTS    <- 300    # Your chosen signal floor
 
-MAX_MT        <- 50     # Standard limit for healthy brain nuclei
+MAX_MT        <- 10     # Standard limit for healthy brain nuclei
 CHOSEN_RES    <- 0.6    # look at results/clustering/01_umap_all_resolutions.pdf
 # and change this if needed before re-running clustering
-                           
-                            
+
 # ================================================================================
 #  STEP 2: LOAD DATA + QUALITY CONTROL
 # ================================================================================
@@ -278,4 +277,5 @@ saveRDS(seurat_filtered,"objects/01_seurat_qc.rds")
 
 cat(sprintf("\n✔ Step 2 QC Complete! Total cells surviving QC: %d\n\n",
             sum(sapply(seurat_filtered, ncol))))
+
 
