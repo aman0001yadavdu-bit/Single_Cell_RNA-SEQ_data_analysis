@@ -742,9 +742,712 @@ print(Graphs(seu))
 # You should now see "RNA_snn" and "RNA_nn" in your console
 
 
+# ================================================================================
+#  STEP 8: CLUSTERING
+# ================================================================================
+cat("━━━ STEP 8: Clustering ━━━\n")
+         
+# NEW FIX: Automatically inject CHOSEN_RES so it is guaranteed to be calculated
+resolutions <- unique(sort(c(0.2, 0.4, 0.6, 0.8, 1.0, 1.2, CHOSEN_RES)))
+seu         <- FindClusters(seu, resolution=resolutions, verbose=FALSE)
+
+# Auto-detect prefix
+res_prefix <- ifelse(any(grepl("SCT_snn", colnames(seu@meta.data))),
+                     "SCT_snn_res.", "RNA_snn_res.")
+
+cat("  Clusters per resolution:\n")
+for (r in resolutions) {
+  col <- paste0(res_prefix, r)
+  if (col %in% colnames(seu@meta.data))
+    cat(sprintf("    %.1f → %d clusters\n", r,
+                length(unique(seu@meta.data[[col]]))))
+}
+
+cat(sprintf("\n  ⚠ CHOSEN_RES = %.1f (look at 01_umap_all_resolutions.pdf\n", CHOSEN_RES))
+cat("    and change CHOSEN_RES at the top of the script if needed)\n\n")
+
+# All resolutions plot
+pdf("results/clustering/01_umap_all_resolutions.pdf", width=16, height=10)
+pl <- lapply(resolutions, function(r) {
+  col <- paste0(res_prefix, r)
+  if (!col %in% colnames(seu@meta.data)) return(NULL)
+  nc  <- length(unique(seu@meta.data[[col]]))
+  DimPlot(seu, group.by=col, label=TRUE, pt.size=0.3, label.size=3) +
+    ggtitle(sprintf("Res %.1f — %d clusters",r,nc)) +
+    theme_classic() + NoLegend()
+})
+print(wrap_plots(pl[!sapply(pl,is.null)], ncol=3))
+dev.off()
+cat("  ✔ Saved: results/clustering/01_umap_all_resolutions.pdf\n")
+
+# Apply chosen resolution
+chosen_col  <- paste0(res_prefix, CHOSEN_RES)
+Idents(seu) <- chosen_col
+seu$seurat_clusters <- Idents(seu)
+n_clust     <- length(unique(seu$seurat_clusters))
+cat(sprintf("  Using resolution %.1f → %d clusters\n", CHOSEN_RES, n_clust))
+
+# Numbered UMAP
+pdf("results/clustering/02_umap_clusters_numbered.pdf", width=10, height=8)
+print(DimPlot(seu, label=TRUE, pt.size=0.4, label.size=5,
+              label.color="black") +
+        ggtitle(sprintf("Clusters (Res %.1f | %d PCs)", CHOSEN_RES, N_PCS)) +
+        theme_classic(base_size=13) +
+        theme(plot.title=element_text(face="bold")))
+dev.off()
+cat("  ✔ Saved: results/clustering/02_umap_clusters_numbered.pdf\n")
+
+# Marker genes
+# Find Marker genes
+cat("  Finding marker genes...\n")
+
+tryCatch({
+  seu[["RNA"]] <- JoinLayers(seu[["RNA"]])
+}, error=function(e) NULL)
+
+markers <- FindAllMarkers(seu, only.pos=TRUE, min.pct=0.25,
+                          logfc.threshold=0.25, test.use="wilcox",
+                          verbose=FALSE)
+
+# Save all markers to a CSV
+write.csv(markers, "results/clustering/all_marker_genes.csv", row.names=FALSE)
+
+# Extract Top 10 Markers per cluster
+top10 <- markers %>% 
+  group_by(cluster) %>%
+  slice_max(avg_log2FC, n = 10, with_ties = FALSE) %>% 
+  ungroup()
+
+# Save the top 10 markers to a CSV
+write.csv(top10, "results/clustering/top10_markers_per_cluster.csv", row.names = FALSE)
+
+# Extract Top 5 and Top 2 genes for plotting later
+top5_genes <- markers %>% 
+  group_by(cluster) %>%
+  slice_max(avg_log2FC, n = 5, with_ties = FALSE) %>% 
+  pull(gene) %>% 
+  unique()
+
+top2_genes <- markers %>% 
+  group_by(cluster) %>%
+  slice_max(avg_log2FC, n = 2, with_ties = FALSE) %>% 
+  pull(gene) %>% 
+  unique()
+
+# NEW FIX: Explicitly scale the marker genes so they actually appear in the heatmap
+cat("  Scaling marker genes for heatmap...\n")
+seu <- ScaleData(seu, 
+                 features = unique(c(VariableFeatures(seu), top5_genes)), 
+                 verbose=FALSE)
+
+pdf("results/clustering/03_marker_heatmap.pdf", width=14, height=10)
+# Note: Added print() here to ensure the ggplot renders properly inside the script
+print(DoHeatmap(seu, features=top5_genes) +
+        theme(axis.text.y=element_text(size=7)) +
+        ggtitle("Top 5 Marker Genes per Cluster"))
+dev.off()
+cat("  ✔ Saved: results/clustering/03_marker_heatmap.pdf\n")
+
+pdf("results/clustering/04_marker_dotplot.pdf", width=14, height=6)
+print(DotPlot(seu, features=top2_genes) + RotatedAxis() +
+        ggtitle("Top 2 Markers per Cluster") + theme_classic() +
+        theme(axis.text.x=element_text(size=7,angle=45)))
+dev.off()
+cat("  ✔ Saved: results/clustering/04_marker_dotplot.pdf\n")
+
+write.csv(as.data.frame(table(seu$seurat_clusters)),
+          "results/clustering/cells_per_cluster.csv", row.names=FALSE)
+gc()
+
+# ==============================================================================
+#  STEP 9: AUTOMATED ANNOTATION (SingleR) - MASTER FIX
+# ==============================================================================
+cat("━━━ STEP 9: Automated Annotation (SingleR) ━━━\n")
+
+library(SingleR)
+library(celldex)
+library(dplyr)
+
+# 1. Setup Reference Data (Full-Body Reference)
+cat("  Loading Human Primary Cell Atlas (Full Body Reference)...\n")
+ref <- HumanPrimaryCellAtlasData()
+
+# 2. Extract Data (Using 'layer' for Seurat v5 and Variable Features for speed)
+cat("  Extracting Variable Features...\n")
+var_genes <- VariableFeatures(seu)
+expr <- GetAssayData(seu, assay="RNA", layer="data")[var_genes, ]
+
+# 3. Run SingleR 
+cat("  Running SingleR (using 10 cores)...\n")
+singler_res <- SingleR(test=expr, ref=ref, labels=ref$label.main, 
+                       BPPARAM=BiocParallel::MulticoreParam(workers=N_CORES))
+
+# 4. Extract raw labels and attach cell names
+raw_labels        <- singler_res$labels
+names(raw_labels) <- rownames(singler_res)
+
+# 5. Add raw labels to Seurat safely
+seu$SingleR_Raw <- raw_labels[colnames(seu)]
+
+# 6. Calculate the Majority Vote per Cluster (Bulletproof version)
+# Forcing character vectors ensures the dataframe builds perfectly without missing columns
+anno_df <- data.frame(
+  Cluster = as.character(Idents(seu)),
+  Label = as.character(seu$SingleR_Raw),
+  stringsAsFactors = FALSE
+)
+
+majority_labels <- anno_df %>%
+  dplyr::group_by(Cluster, Label) %>%
+  dplyr::tally() %>%
+  dplyr::slice_max(order_by = n, n = 1, with_ties = FALSE)
+
+# 7. Map the clean labels back to every cell
+seu$SingleR_Majority <- majority_labels$Label[match(as.character(Idents(seu)), majority_labels$Cluster)]
+
+# 8. Save a Cluster-to-CellType Mapping Table
+mapping_table <- majority_labels %>% 
+  dplyr::rename(Assigned_CellType = Label, Cell_Count = n)
+write.csv(mapping_table, "results/annotation/cluster_annotation_summary.csv", row.names = FALSE)
+cat("  ✔ Saved: results/annotation/cluster_annotation_summary.csv\n")
+
+# 9. Save the Clean UMAP
+pdf("results/annotation/02_umap_singler_majority.pdf", width=14, height=10)
+print(DimPlot(seu, group.by="SingleR_Majority", label=TRUE, repel=TRUE, pt.size=0.3) +
+        ggtitle("SingleR Annotations (Full-Body Majority Vote)") +
+        theme_classic() + NoLegend())
+dev.off()
+cat("  ✔ Saved: results/annotation/02_umap_singler_majority.pdf\n")
+
+# 10. Known Markers DotPlot (Verification Step)
+cat("  Generating DotPlot of known markers...\n")
+known_markers <- c("TH", "SLC6A3", "DDC", "ALDH1A1",   # Dopaminergic
+                   "SLC17A6", "SLC17A7",               # Glutamatergic
+                   "GAD1", "GAD2",                     # GABAergic
+                   "PTPRC", "CD14", "AIF1",            # Immune/Microglia
+                   "GFAP", "S100B")                    # Astrocytes
+
+# Ensure we only plot genes that actually exist to prevent errors
+valid_markers <- intersect(known_markers, rownames(seu))
+
+pdf("results/annotation/03_dotplot_known_markers.pdf", width=12, height=8)
+print(DotPlot(seu, features=valid_markers, cols=c("lightgrey", "red")) + 
+        RotatedAxis() + 
+        ggtitle("Expression of Known Brain Markers per Cluster"))
+dev.off()
+cat("  ✔ Saved: results/annotation/03_dotplot_known_markers.pdf\n")
+# ==============================================================================
+
+#manually clustering for the parkinsins dataset 202210 by me
+
+
+# ==============================================================================
+#  STEP 9.5: MANUAL ANNOTATION (Presentation-Ready Master Version)
+# ==============================================================================
+cat("━━━ STEP 9.5: Finalizing Presentation UMAP ━━━\n")
+
+# 1. Start fresh with cluster numbers
+seu$Manual_CellType <- as.character(seu$seurat_clusters)
+
+# 2. Assign the names we already verified
+seu$Manual_CellType[seu$Manual_CellType %in% c("5", "20", "24")] <- "Microglia"
+seu$Manual_CellType[seu$Manual_CellType %in% c("2", "23", "25")] <- "Astrocyte"
+seu$Manual_CellType[seu$Manual_CellType %in% c("6", "8", "9", "11", "13", "14")] <- "GABAergic Neuron"
+seu$Manual_CellType[seu$Manual_CellType %in% c("3", "7", "10", "15", "16")] <- "Glutamatergic Neuron"
+
+# 3. NEW: Assign the remaining major brain cells to clean up the numbers
+# 🟣 Oligodendrocytes (The massive 0, 1, 4 island)
+seu$Manual_CellType[seu$Manual_CellType %in% c("0", "1", "4")] <- "Oligodendrocyte"
+
+# 🟤 OPCs (Oligodendrocyte Precursor Cells)
+seu$Manual_CellType[seu$Manual_CellType %in% c("12", "18", "19")] <- "OPC"
+
+# 🟡 Endothelial Cells (Blood vessels - Cluster 21)
+seu$Manual_CellType[seu$Manual_CellType %in% c("21")] <- "Endothelial"
+
+# ⚪ Catch-all for any tiny remaining numbers (so the plot looks clean)
+seu$Manual_CellType[seu$Manual_CellType %in% c("17", "22")] <- "Other/Mixed"
+
+# 4. Set these new names as the Default
+Idents(seu) <- "Manual_CellType"
+
+# 5. Draw the FINAL, beautiful UMAP for your presentation
+pdf("results/annotation/04_umap_manual_annotation_FINAL.pdf", width=12, height=8)
+print(DimPlot(seu, group.by="Manual_CellType", label=TRUE, repel=TRUE, pt.size=0.3) +
+        ggtitle("Final Cell Type Annotations") +
+        theme_classic())
+dev.off()
+cat("  ✔ Saved: results/annotation/04_umap_manual_annotation_FINAL.pdf\n")
+
+# 6. EXPANDED DotPlot to mathematically prove the new names
+cat("  Generating Expanded DotPlot to verify new clusters...\n")
+expanded_markers <- c("TH", "SLC6A3",                        # Dopaminergic
+                      "SLC17A7", "SLC17A6",                  # Glutamatergic
+                      "GAD1", "GAD2",                        # GABAergic
+                      "PTPRC", "AIF1",                       # Microglia
+                      "GFAP", "S100B",                       # Astrocytes
+                      "MBP", "PLP1", "MOG",                  # NEW: Oligodendrocytes
+                      "PDGFRA", "CSPG4",                     # NEW: OPCs
+                      "CLDN5", "VWF")                        # NEW: Endothelial
+
+valid_expanded <- intersect(expanded_markers, rownames(seu))
+
+pdf("results/annotation/05_dotplot_expanded_proof.pdf", width=14, height=8)
+print(DotPlot(seu, features=valid_expanded, cols=c("lightgrey", "blue")) + 
+        RotatedAxis() + 
+        ggtitle("Expanded Brain Markers (Proof of Annotation)"))
+dev.off()
+cat("  ✔ Saved: results/annotation/05_dotplot_expanded_proof.pdf\n")
+# ==============================================================================
+
+# free space to ram
+
+cat("Saving fully annotated Seurat object...\n")
+saveRDS(seu, "objects/09_seurat_annotated_FINAL.rds")
+cat("✔ Safe to quit!\n")
+
+q(save = "no")
+
+
+#morning reload 
+
+# 1. Load the core libraries
+library(Seurat)
+library(monocle3)
+library(SeuratWrappers)
+library(ggplot2)
+library(dplyr)
+
+# 2. Reload your perfectly annotated data
+cat("Loading Seurat object...\n")
+seu <- readRDS("objects/09_seurat_annotated_FINAL.rds")
+cat("✔ Ready for Step 10!\n")
+
+# === UPDATED STARTUP ===
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(patchwork) # Added this so wrap_plots works!
+
+CHOSEN_RES <- 0.6
+N_CORES    <- 10
+N_PCS      <- 15  # Added this so your titles don't error out!
+
+#all library
+suppressPackageStartupMessages({
+  library(Seurat);  library(ggplot2);  library(dplyr);    library(patchwork)
+  library(ggrepel); library(Matrix);   library(GEOquery); library(R.utils)
+  library(harmony); library(DoubletFinder)
+  library(SingleR); library(celldex);  library(DESeq2)
+  library(lisi);    library(monocle3); library(SeuratWrappers)
+})
 
 
 
 
+# ================================================================================
+#  STEP 10: TRAJECTORY ANALYSIS (Monocle3) - OLIGODENDROCYTE LINEAGE
+# ================================================================================
+cat("━━━ STEP 10: Trajectory Analysis (OPC to Oligodendrocyte) ━━━\n")
+
+tryCatch({
+  # 1. SUBSET THE DATA: Only look at the relevant biological family
+  cat("  Subsetting to OPC and Oligodendrocyte lineage...\n")
+  seu_sub <- subset(seu, Manual_CellType %in% c("OPC", "Oligodendrocyte"))
+  
+  # 2. Convert subset to Monocle3
+  cds <- as.cell_data_set(seu_sub)
+  rowData(cds)$gene_short_name <- rownames(cds)
+  
+  # 3. Monocle3 Specific Preprocessing on the subset
+  cds <- estimate_size_factors(cds)
+  cds <- preprocess_cds(cds, num_dim = 30)
+  cds <- reduce_dimension(cds, reduction_method="UMAP")
+  cds <- cluster_cells(cds)
+  cds <- learn_graph(cds, use_partition=FALSE, verbose=FALSE)
+  
+  # 4. Plot the Cell Types
+  pdf("results/trajectory/01_trajectory_celltype.pdf", width=10, height=8)
+  print(plot_cells(cds, color_cells_by="Manual_CellType",
+                   label_groups_by_cluster=FALSE,
+                   label_leaves=TRUE, label_branch_points=TRUE,
+                   cell_size=0.7) +
+          ggtitle("Trajectory — OPC to Oligodendrocyte") + theme_classic())
+  dev.off()
+  
+  # 5. EXACT BIOLOGICAL ROOT: We know OPCs are the baby cells.
+  cat("  Setting OPCs as the biological root...\n")
+  root_method <- "Manual selection of OPC cluster"
+  
+  # Find the exact cell barcodes for the baby OPCs
+  opc_cells <- rownames(subset(seu_sub@meta.data, Manual_CellType == "OPC"))
+  
+  # 6. Calculate Pseudotime (Bulletproof Method)
+  # Pass the raw cells directly to Monocle3 and let it calculate the root internally
+  cds <- order_cells(cds, root_cells=opc_cells)
+  seu_sub$pseudotime <- pseudotime(cds)
+  
+  # 7. Plot Pseudotime
+  pdf("results/trajectory/02_pseudotime.pdf", width=10, height=8)
+  print(plot_cells(cds, color_cells_by="pseudotime",
+                   label_cell_groups=FALSE, label_leaves=FALSE,
+                   label_branch_points=FALSE, cell_size=0.7,
+                   trajectory_graph_color="black",
+                   trajectory_graph_segment_size=1) +
+          scale_color_viridis_c(option="plasma") +
+          ggtitle("Oligo Maturation (Pseudotime)") + theme_classic())
+  dev.off()
+  
+  # 8. Find Genes that change over time (Restricted to Variable Features to save RAM!)
+  cat("  Calculating pseudotime-associated genes (using top variable genes)...\n")
+  
+  # Get the variable genes and make sure they exist in the Monocle object
+  var_genes <- VariableFeatures(seu)
+  valid_var_genes <- intersect(var_genes, rownames(cds))
+  
+  # Run the heavy math ONLY on the variable genes
+  pt_genes <- graph_test(cds[valid_var_genes, ], neighbor_graph="principal_graph", cores=2) %>%
+    dplyr::arrange(dplyr::desc(morans_I)) %>% 
+    dplyr::filter(q_value < 0.05)
+  
+  write.csv(pt_genes,"results/trajectory/pseudotime_genes.csv", row.names=FALSE)
+  cat(sprintf("  Found %d pseudotime-associated genes.\n", nrow(pt_genes)))
+  
+  # 9. Plot the Top 6 Genes that drive maturation
+  top6 <- head(rownames(pt_genes), 6)
+  if (length(top6) > 0) {
+    pdf("results/trajectory/03_pseudotime_top_genes.pdf", width=16, height=10)
+    print(plot_cells(cds, genes=top6, show_trajectory_graph=FALSE,
+                     label_cell_groups=FALSE, cell_size=0.5) + theme_classic())
+    dev.off()
+  }
+  cat("✔ Trajectory done.\n\n")
+  
+}, error=function(e) {
+  cat("  ⚠ Trajectory error:", e$message, "\n")
+  cat("  Continuing...\n\n")
+})
+
+# Save the subset objects
+saveRDS(seu_sub,"objects/08_seurat_oligo_lineage.rds")
+if (exists("cds")) saveRDS(cds,"objects/08_monocle_cds.rds")
+# ================================================================================
+
+
+
+
+
+# ================================================================================
+#  STEP 10.5: FINDING MATURATION GENES (Bypassing the Linux Error)
+# ================================================================================
+cat("━━━ STEP 10.5: Calculating Gene Correlations ━━━\n")
+
+# 1. Load the successfully saved timeline object
+seu_sub <- readRDS("objects/08_seurat_oligo_lineage.rds")
+
+# 2. Extract the RNA data and the successful timeline values
+cat("  Extracting expression matrix and pseudotime...\n")
+var_genes <- VariableFeatures(seu)
+expr_matrix <- GetAssayData(seu_sub, assay="RNA", layer="data")[var_genes, ]
+pt_values <- seu_sub$pseudotime
+
+# 3. Filter out any cells that Monocle couldn't connect (infinite/NA values)
+valid_cells <- !is.na(pt_values) & is.finite(pt_values)
+expr_matrix <- expr_matrix[, valid_cells]
+pt_values <- pt_values[valid_cells]
+
+# 4. Calculate Spearman Correlation (Does the gene track with time?)
+cat("  Running correlation math (No Linux libraries required!)...\n")
+# We convert to a dense matrix just for the calculation to ensure it works smoothly
+expr_matrix_dense <- as.matrix(expr_matrix)
+cor_scores <- apply(expr_matrix_dense, 1, function(x) cor(x, pt_values, method="spearman"))
+
+# 5. Build the final clean table
+gene_df <- data.frame(
+  Gene = names(cor_scores),
+  Spearman_Correlation = cor_scores,
+  stringsAsFactors = FALSE
+)
+
+# Sort by absolute correlation (The strongest drivers of maturation rise to the top)
+gene_df <- gene_df[order(abs(gene_df$Spearman_Correlation), decreasing = TRUE), ]
+
+# Save your master gene list
+write.csv(gene_df, "results/trajectory/pseudotime_genes_correlation.csv", row.names=FALSE)
+cat("  ✔ Saved: results/trajectory/pseudotime_genes_correlation.csv\n")
+
+# 6. Plot the Top 6 Genes on the Seurat UMAP
+cat("  Plotting top 6 maturation genes...\n")
+top_6_genes <- head(gene_df$Gene, 6)
+
+pdf("results/trajectory/03_pseudotime_top_genes_seurat.pdf", width=12, height=8)
+print(FeaturePlot(seu_sub, features = top_6_genes, pt.size = 0.5) + theme_classic())
+dev.off()
+cat("  ✔ Saved: results/trajectory/03_pseudotime_top_genes_seurat.pdf\n")
+# ================================================================================
+
+
+
+
+
+# ================================================================================
+#  STEP 11: PSEUDOBULK DEG WITH DESeq2
+#  Customized for Seurat v5, Manual_CellType, and accurate metadata
+# ================================================================================
+cat("━━━ STEP 11: Pseudobulk DEG (DESeq2) ━━━\n")
+dir.create("results/DEG", showWarnings = FALSE, recursive = TRUE)
+
+# Load required libraries
+library(DESeq2)
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+
+# Use the object that is ALREADY loaded in your environment from Step 10!
+DefaultAssay(seu) <- "RNA"
+
+# Pseudobulk function — FIX 6: lapply + robust NULL handling + Seurat v5 Layers
+run_pseudobulk <- function(seu_obj, label="all_cells") {
+  cat(sprintf("  Aggregating: %s\n", label))
+  samples <- unique(seu_obj$orig.ident)
+  
+  # FIX: Use 'layer' for Seurat v5
+  pb_list <- lapply(samples, function(s) {
+    cells_s <- colnames(seu_obj)[seu_obj$orig.ident == s]
+    if (length(cells_s) < 5) return(NULL)
+    mat <- GetAssayData(seu_obj, assay="RNA", layer="counts")[, cells_s, drop=FALSE]
+    Matrix::rowSums(mat)
+  })
+  names(pb_list) <- samples
+  
+  # Remove NULL entries (samples with <5 cells in this cell type)
+  pb_list <- pb_list[!sapply(pb_list, is.null)]
+  
+  if (length(pb_list) < 4) {
+    cat(sprintf("    Skipped — only %d valid samples\n", length(pb_list)))
+    return(NULL)
+  }
+  
+  pb_mat <- do.call(cbind, pb_list)
+  
+  # FIX: Safely extract the exact disease status from Seurat metadata, not string guessing
+  disease_vec <- seu_obj@meta.data$disease[match(colnames(pb_mat), seu_obj$orig.ident)]
+  
+  meta <- data.frame(
+    sample  = colnames(pb_mat),
+    disease = factor(disease_vec, levels=c("Healthy_Control", "Parkinsons_Disease")),
+    row.names=colnames(pb_mat)
+  )
+  
+  tryCatch({
+    dds  <- DESeqDataSetFromMatrix(countData=round(pb_mat), colData=meta, design=~disease)
+    keep <- rowSums(counts(dds) >= 10) >= 2
+    dds  <- dds[keep,]
+    dds  <- DESeq(dds, quiet=TRUE)
+    res  <- results(dds, contrast=c("disease","Parkinsons_Disease","Healthy_Control"), alpha=0.05)
+    
+    df         <- as.data.frame(res)
+    df$gene    <- rownames(df)
+    df$label   <- label
+    df         <- df[order(df$padj, na.last=TRUE),]
+    n_sig      <- sum(df$padj < 0.05, na.rm=TRUE)
+    cat(sprintf("    ✔ %d significant DEGs (padj<0.05)\n", n_sig))
+    df
+  }, error=function(e) {
+    cat(sprintf("    ✘ DESeq2 error: %s\n", e$message)); NULL
+  })
+}
+
+# Overall DEG
+cat("  Overall DEG (all cells)...\n")
+deg_overall <- run_pseudobulk(seu, "all_cells")
+
+deg_up <- deg_down <- data.frame()
+if (!is.null(deg_overall)) {
+  deg_up   <- deg_overall %>% filter(log2FoldChange >  1 & padj < 0.05) %>% arrange(desc(log2FoldChange))
+  deg_down <- deg_overall %>% filter(log2FoldChange < -1 & padj < 0.05) %>% arrange(log2FoldChange)
+  
+  cat(sprintf("  Up in PD : %d | Up in HC : %d\n", nrow(deg_up), nrow(deg_down)))
+  
+  write.csv(deg_overall,"results/DEG/pseudobulk_all_DEGs_PD_vs_HC.csv",  row.names=FALSE)
+  write.csv(deg_up,     "results/DEG/pseudobulk_upregulated_in_PD.csv",  row.names=FALSE)
+  write.csv(deg_down,   "results/DEG/pseudobulk_downregulated_in_PD.csv",row.names=FALSE)
+  
+  # VOLCANO PLOT
+  deg_overall$color <- "Not Significant"
+  deg_overall$color[deg_overall$log2FoldChange >  1 & deg_overall$padj < 0.05] <- "Up in PD"
+  deg_overall$color[deg_overall$log2FoldChange < -1 & deg_overall$padj < 0.05] <- "Up in HC"
+  
+  top_labels <- bind_rows(
+    if (nrow(deg_up)   > 0) head(deg_up,   15) else data.frame(),
+    if (nrow(deg_down) > 0) head(deg_down, 15) else data.frame())
+  
+  pdf("results/DEG/01_volcano_plot.pdf", width=11, height=9)
+  vp <- ggplot(deg_overall[!is.na(deg_overall$padj),],
+               aes(x=log2FoldChange, y=-log10(padj+1e-300), color=color)) +
+    geom_point(size=0.9, alpha=0.6) +
+    scale_color_manual(values=c("Up in PD"="#E63946","Up in HC"="#457B9D", "Not Significant"="grey75")) +
+    geom_vline(xintercept=c(-1,1), linetype="dashed", color="black", linewidth=0.5) +
+    geom_hline(yintercept=-log10(0.05), linetype="dashed", color="black", linewidth=0.5) +
+    labs(title    = "Pseudobulk DEG — Parkinson's vs Healthy",
+         subtitle = "DESeq2 | LFC threshold=1 | padj<0.05",
+         x="Log2 Fold Change (positive = higher in PD)",
+         y="-Log10 Adjusted P-value", color="") +
+    theme_classic(base_size=13) +
+    theme(plot.title=element_text(face="bold",size=15),
+          plot.subtitle=element_text(size=11,color="grey40"),
+          legend.position="top")
+  
+  if (nrow(top_labels) > 0) {
+    vp <- vp + geom_text_repel(data=top_labels, 
+                               aes(x=log2FoldChange, y=-log10(padj+1e-300), label=gene),
+                               inherit.aes=FALSE, color="black",
+                               size=3.2, max.overlaps=25, segment.color="grey50")
+  }
+  print(vp)
+  dev.off()
+  cat("  ✔ Saved: results/DEG/01_volcano_plot.pdf\n")
+  
+  # DEG HEATMAP
+  heat_genes <- unique(c(
+    if(nrow(deg_up)>0)   head(deg_up$gene,25)   else character(0),
+    if(nrow(deg_down)>0) head(deg_down$gene,25) else character(0)))
+  heat_genes <- heat_genes[heat_genes %in% rownames(seu)]
+  
+  if (length(heat_genes) > 0) {
+    # Ensure genes are scaled before drawing heatmap
+    seu <- ScaleData(seu, features = heat_genes, verbose = FALSE)
+    n_show  <- min(200, sum(seu$disease=="Healthy_Control"), sum(seu$disease=="Parkinsons_Disease"))
+    hc_show <- sample(colnames(seu)[seu$disease=="Healthy_Control"],  n_show)
+    pd_show <- sample(colnames(seu)[seu$disease=="Parkinsons_Disease"],n_show)
+    seu_sub <- subset(seu, cells=c(hc_show,pd_show))
+    Idents(seu_sub) <- "disease"
+    
+    pdf("results/DEG/02_deg_heatmap.pdf", width=13, height=11)
+    print(DoHeatmap(seu_sub, features=heat_genes, group.by="disease",
+                    slot="scale.data",
+                    group.colors=c(Healthy_Control="steelblue", Parkinsons_Disease="firebrick")) +
+            scale_fill_gradientn(colors=c("navy","white","firebrick3")) +
+            theme(axis.text.y=element_text(size=8)) +
+            ggtitle("Top Pseudobulk DEGs — PD vs HC"))
+    dev.off()
+    cat("  ✔ Saved: results/DEG/02_deg_heatmap.pdf\n")
+  }
+}
+
+# Per cell type DEG (FIX: Using Manual_CellType)
+cat("\n  Per cell type pseudobulk DEG...\n")
+all_ct <- list()
+for (ct in unique(seu$Manual_CellType)) {
+  ct_cells <- colnames(seu)[seu$Manual_CellType == ct]
+  hc_n <- length(unique(seu$orig.ident[seu$Manual_CellType==ct & seu$disease=="Healthy_Control"]))
+  pd_n <- length(unique(seu$orig.ident[seu$Manual_CellType==ct & seu$disease=="Parkinsons_Disease"]))
+  
+  if (hc_n < 3 || pd_n < 3) {
+    cat(sprintf("    %-25s → skipped (HC=%d, PD=%d samples)\n",ct,hc_n,pd_n))
+    next
+  }
+  deg_ct <- run_pseudobulk(subset(seu,cells=ct_cells), ct)
+  if (!is.null(deg_ct)) {
+    all_ct[[ct]] <- deg_ct
+    sname <- gsub("[^A-Za-z0-9_]","_",ct)
+    write.csv(deg_ct, file.path("results/DEG",paste0("pseudobulk_DEG_",sname,".csv")), row.names=FALSE)
+  }
+}
+
+if (length(all_ct) > 0) {
+  write.csv(bind_rows(all_ct), "results/DEG/pseudobulk_all_DEGs_per_celltype.csv", row.names=FALSE)
+  cat("  ✔ Saved: results/DEG/pseudobulk_all_DEGs_per_celltype.csv\n")
+}
+
+
+# ==============================================================================
+# PLOT EVERY CELL TYPE (Volcano Loop)
+# ==============================================================================
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+
+cat("Generating Volcano plots for all cell types...\n")
+
+# 1. Find all the individual cell type CSVs in the folder
+csv_files <- list.files("results/DEG", pattern="pseudobulk_DEG_.*\\.csv", full.names=TRUE)
+
+# 2. Open a single PDF that will hold all the pages
+pdf("results/DEG/04_all_celltypes_volcano.pdf", width=9, height=7)
+
+for (file in csv_files) {
+  # Extract the cell type name from the filename
+  ct_name <- gsub("pseudobulk_DEG_|\\.csv", "", basename(file))
+  cat(sprintf("  Plotting %s...\n", ct_name))
+  
+  # Read the data
+  df <- read.csv(file)
+  
+  # Set colors based on the 0.5 threshold
+  df$color <- "Not Significant"
+  df$color[df$log2FoldChange > 0.5 & df$padj < 0.05] <- "Up in PD"
+  df$color[df$log2FoldChange < -0.5 & df$padj < 0.05] <- "Up in HC"
+  
+  # Grab the top genes to label
+  top_genes <- df %>% filter(padj < 0.05) %>% arrange(padj) %>% head(15)
+  
+  # Draw the plot
+  vp <- ggplot(df[!is.na(df$padj),], aes(x=log2FoldChange, y=-log10(padj), color=color)) +
+    geom_point(alpha=0.6, size=1.2) +
+    scale_color_manual(values=c("Up in PD"="#E63946", "Up in HC"="#457B9D", "Not Significant"="grey80")) +
+    geom_vline(xintercept=c(-0.5, 0.5), linetype="dashed", color="black") +
+    geom_hline(yintercept=-log10(0.05), linetype="dashed", color="black") +
+    theme_classic(base_size=14) +
+    ggtitle(sprintf("%s DEG (Parkinson's vs Healthy)", ct_name)) +
+    theme(legend.position="top", legend.title=element_blank())
+  
+  # Add labels if there are any significant genes
+  if (nrow(top_genes) > 0) {
+    vp <- vp + geom_text_repel(data=top_genes, aes(label=gene), 
+                               size=4, color="black", max.overlaps=30)
+  }
+  
+  # Print this plot as a new page in the PDF
+  print(vp)
+}
+
+dev.off()
+cat("✔ Saved master PDF: results/DEG/04_all_celltypes_volcano.pdf\n")
+
+
+
+# ── FINAL SUMMARY ─────────────────────────────────────────────────────────────
+n_sig_total <- if(!is.null(deg_overall)) sum(deg_overall$padj<0.05,na.rm=TRUE) else 0
+
+cat("\n╔══════════════════════════════════════════════════════════╗\n")
+cat("║     🎉  PIPELINE COMPLETE —  PARTY TIME                  ║\n")
+cat("╚══════════════════════════════════════════════════════════╝\n\n")
+cat(sprintf("  Samples               : %d\n",  length(unique(seu$orig.ident))))
+cat(sprintf("  Total cells           : %d\n",  ncol(seu)))
+cat(sprintf("  Genes                 : %d\n",  nrow(seu)))
+cat(sprintf("  Clusters              : %d\n",  length(unique(seu$seurat_clusters))))
+cat(sprintf("  Cell types            : %d\n",  length(unique(seu$Manual_CellType))))
+cat(sprintf("  Pseudobulk DEGs       : %d\n",  n_sig_total))
+cat(sprintf("  Up in PD              : %d\n",  nrow(deg_up)))
+cat(sprintf("  Up in HC              : %d\n\n",nrow(deg_down)))
+
+cat("📋 METHODS SECTION (UPDATED FOR YOUR PROJECT):\n")
+cat("─────────────────────────────────────────────\n")
+cat("  Raw count matrices (GSE184950) were quality-filtered per cell\n")
+cat("  Doublets were removed (DoubletFinder). Cell cycle scores were\n")
+cat("  regressed during scaling. Log-normalization and Harmony integration\n")
+cat("  were applied. Cell types were manually annotated using canonical\n")
+cat("  brain markers based on robust DotPlot expression. Differential\n")
+cat("  expression was performed using pseudobulk aggregation per patient\n")
+cat("  followed by DESeq2 to avoid pseudoreplication. Trajectory analysis\n")
+cat("  was performed with Monocle3, setting Oligodendrocyte Precursor\n")
+cat("  Cells (OPCs) as the biological root to map myelin maturation.\n")
+cat("─────────────────────────────────────────────\n\n")
+
+# Save final absolute backup
+saveRDS(seu, "objects/10_seurat_FINISHED.rds")
+cat("💾 FINAL OBJECT SAVED: objects/10_seurat_FINISHED.rds\n")
+# ===================
 
 
