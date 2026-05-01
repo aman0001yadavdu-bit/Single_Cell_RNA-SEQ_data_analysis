@@ -1501,18 +1501,7 @@ cat(sprintf("  Pseudobulk DEGs       : %d\n",  n_sig_total))
 cat(sprintf("  Up in PD              : %d\n",  nrow(deg_up)))
 cat(sprintf("  Up in HC              : %d\n\n",nrow(deg_down)))
 
-cat("📋 METHODS SECTION (UPDATED FOR YOUR PROJECT):\n")
-cat("─────────────────────────────────────────────\n")
-cat("  Raw count matrices (GSE184950) were quality-filtered per cell\n")
-cat("  Doublets were removed (DoubletFinder). Cell cycle scores were\n")
-cat("  regressed during scaling. Log-normalization and Harmony integration\n")
-cat("  were applied. Cell types were manually annotated using canonical\n")
-cat("  brain markers based on robust DotPlot expression. Differential\n")
-cat("  expression was performed using pseudobulk aggregation per patient\n")
-cat("  followed by DESeq2 to avoid pseudoreplication. Trajectory analysis\n")
-cat("  was performed with Monocle3, setting Oligodendrocyte Precursor\n")
-cat("  Cells (OPCs) as the biological root to map myelin maturation.\n")
-cat("─────────────────────────────────────────────\n\n")
+
 
 # Save final absolute backup
 saveRDS(seu, "objects/10_seurat_FINISHED.rds")
