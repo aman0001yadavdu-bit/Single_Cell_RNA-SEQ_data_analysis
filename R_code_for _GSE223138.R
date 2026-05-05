@@ -131,25 +131,37 @@ for (pfx in prefixes) {
 # ── 2. ROBUST DISEASE LABELING ────────────────────────────────────────────────
 cat("  Scanning metadata for disease labels...\n")
 
-diag_col_idx <- which(apply(sample_meta, 2, function(x) any(grepl("diagnosis", x, ignore.case=TRUE))))[1]
+# Collapse the extracted metadata columns into a single string per sample
+all_meta_text <- apply(sample_meta, 2, as.character) 
+all_meta_text <- apply(all_meta_text, 1, paste, collapse=" ")
 
-if (!is.na(diag_col_idx)) {
-  diag_col_name <- colnames(sample_meta)[diag_col_idx]
-  cat("  Found diagnosis info in column:", diag_col_name, "\n")
-  disease_map <- ifelse(grepl("control|healthy|normal|HC", sample_meta[[diag_col_name]], ignore.case=TRUE), 
-                        "Healthy_Control", "Parkinsons_Disease")
-} else {
-  cat("  Warning: 'diagnosis' keyword not found. Using Title-based fallback.\n")
-  ctrl_titles <- c("C7","C9","D1","D10","D12","D13","D15","D2","D4","D5","D6","D7")
-  disease_map <- ifelse(sample_meta$title %in% ctrl_titles, "Healthy_Control", "Parkinsons_Disease")
-}
+# Positive match: If it has any of these control words, it's a Healthy Control.
+# Otherwise, it's Parkinson's.
+is_control <- grepl("HC|control|healthy|normal", all_meta_text, ignore.case = TRUE)
 
+disease_map <- ifelse(is_control, "Healthy_Control", "Parkinsons_Disease")
 names(disease_map) <- sample_meta$geo_accession
-# Ensure the data directory exists BEFORE saving the CSV
-cat("✔ Download complete.\n\n")
 
+# --- NEW: Explicit Summary Printout ---
+cat("\n  =========================================\n")
+cat("  DISEASE ASSIGNMENT SUMMARY:\n")
+cat("  =========================================\n")
+
+hc_samples <- names(disease_map)[disease_map == "Healthy_Control"]
+pd_samples <- names(disease_map)[disease_map == "Parkinsons_Disease"]
+
+cat("  ▶ Healthy Control (", length(hc_samples), " samples):\n    ", 
+    paste(hc_samples, collapse=", "), "\n\n", sep="")
+
+cat("  ▶ Parkinson's Disease (", length(pd_samples), " samples):\n    ", 
+    paste(pd_samples, collapse=", "), "\n\n", sep="")
+
+# Keep the detailed table view just in case you need to check titles
+print(data.frame(geo_id  = names(disease_map),
+                 title   = sample_meta$title,
+                 disease = disease_map))
 # ── USER SETTINGS (OPTIMIZED COMPROMISE) ──
-GEO_ACCESSION <- "GSE184950"
+GEO_ACCESSION <- "GSE223138"
 N_CORES       <- 10
 
 MIN_FEATURES  <- 300    # Your chosen floor
@@ -427,7 +439,7 @@ cat("✔ File saved successfully to objects/seurat_norm.rds\n")
 
 
 
-# Run garbage collection to return about 11+ GB of RAM to your server
+
 gc()
 # or bhi cheeje hatani hai yaha par RAM free kanre ke liye 
 
@@ -519,14 +531,7 @@ cat("  ✔ Saved: results/integration/02_umap_after_integration.pdf\n")
 
 
 
-## check point###############################################
-# Create the folder first just in case
-if (!dir.exists("objects")) dir.create("objects")
 
-# Save the object
-saveRDS(merged, file = "objects/merged.rds")
-
-cat("✔ File saved successfully to objects/merged.rds\n")
 
 # ── FIX 5: LISI on Harmony embeddings (correct space) ────────────────────────
 cat("  Computing LISI on Harmony embeddings (correct space)...\n")
@@ -657,9 +662,6 @@ gc()
 
 
 
-#  RAM CLEANING =======
-# Create the objects directory if it doesn't exist
-if (!dir.exists("objects")) dir.create("objects")
 
 # Save the integrated object (this is your master file)
 saveRDS(merged, "objects/07_integrated_checkpoint.rds")
@@ -668,8 +670,6 @@ saveRDS(merged, "objects/07_integrated_checkpoint.rds")
 cat("✔ Step 7 Save Point created: objects/07_integrated_checkpoint.rds\n")
 
 #clean slate
-# Clear every single object from your environment
-rm(list = ls())
 
 # Force the server to reclaim the RAM
 gc()
@@ -746,7 +746,7 @@ print(Graphs(seu))
 #  STEP 8: CLUSTERING
 # ================================================================================
 cat("━━━ STEP 8: Clustering ━━━\n")
-         
+
 # NEW FIX: Automatically inject CHOSEN_RES so it is guaranteed to be calculated
 resolutions <- unique(sort(c(0.2, 0.4, 0.6, 0.8, 1.0, 1.2, CHOSEN_RES)))
 seu         <- FindClusters(seu, resolution=resolutions, verbose=FALSE)
@@ -1431,23 +1431,7 @@ cat(sprintf("  Cell types            : %d\n",  length(unique(seu$Manual_CellType
 cat(sprintf("  Pseudobulk DEGs       : %d\n",  n_sig_total))
 cat(sprintf("  Up in PD              : %d\n",  nrow(deg_up)))
 cat(sprintf("  Up in HC              : %d\n\n",nrow(deg_down)))
-
-cat("📋 METHODS SECTION (UPDATED FOR YOUR PROJECT):\n")
-cat("─────────────────────────────────────────────\n")
-cat("  Raw count matrices (GSE184950) were quality-filtered per cell\n")
-cat("  Doublets were removed (DoubletFinder). Cell cycle scores were\n")
-cat("  regressed during scaling. Log-normalization and Harmony integration\n")
-cat("  were applied. Cell types were manually annotated using canonical\n")
-cat("  brain markers based on robust DotPlot expression. Differential\n")
-cat("  expression was performed using pseudobulk aggregation per patient\n")
-cat("  followed by DESeq2 to avoid pseudoreplication. Trajectory analysis\n")
-cat("  was performed with Monocle3, setting Oligodendrocyte Precursor\n")
-cat("  Cells (OPCs) as the biological root to map myelin maturation.\n")
-cat("─────────────────────────────────────────────\n\n")
-
 # Save final absolute backup
 saveRDS(seu, "objects/10_seurat_FINISHED.rds")
 cat("💾 FINAL OBJECT SAVED: objects/10_seurat_FINISHED.rds\n")
 # ===================
-
-
