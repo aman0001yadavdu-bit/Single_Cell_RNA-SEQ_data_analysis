@@ -10,10 +10,10 @@ cat("✔ Seed set: 123\n\n")
 
 # ── USER SETTINGS ─────────────────────────────────────────────────────────────
 GEO_ACCESSION <- "GSE202210"
-N_CORES       <- 12
+N_CORES       <- 10
 MIN_FEATURES  <- 200
 MAX_FEATURES  <- 6000
-MAX_MT        <- 20
+MAX_MT        <- 10
 MIN_COUNTS    <- 500
 CHOSEN_RES    <- 0.6    # look at results/clustering/01_umap_all_resolutions.pdf
 # and change this if needed before re-running clustering
@@ -79,7 +79,7 @@ gse <- getGEO(GEO_ACCESSION, GSEMatrix=TRUE, getGPL=FALSE)
 cat("  Title  :", gse[[1]]@experimentData@title, "\n")
 
 # ── FIX 3: Build disease labels from GEO metadata (not string guessing) ───────
-sample_meta <- pData(gse[[1]])
+sample_meta <- Biobase::pData(gse[[1]])
 
 # Extract useful columns safely
 meta_cols   <- intersect(c("title","geo_accession","source_name_ch1",
@@ -157,8 +157,38 @@ for (pfx in prefixes) {
                                   c("barcodes.tsv.gz","features.tsv.gz","matrix.mtx.gz"))))
   cat(sprintf("    %-38s %s\n", pfx, ifelse(ok,"✔","✘ check files")))
 }
-cat("✔ Download complete.\n\n")
+# ── 2. ROBUST DISEASE LABELING ────────────────────────────────────────────────
+cat("  Scanning metadata for disease labels...\n")
 
+# Collapse the extracted metadata columns into a single string per sample
+all_meta_text <- apply(sample_meta, 2, as.character) 
+all_meta_text <- apply(all_meta_text, 1, paste, collapse=" ")
+
+# Positive match: If it has any of these control words, it's a Healthy Control.
+# Otherwise, it's Parkinson's.
+is_control <- grepl("HC|control|healthy|normal", all_meta_text, ignore.case = TRUE)
+
+disease_map <- ifelse(is_control, "Healthy_Control", "Parkinsons_Disease")
+names(disease_map) <- sample_meta$geo_accession
+
+# --- NEW: Explicit Summary Printout ---
+cat("\n  =========================================\n")
+cat("  DISEASE ASSIGNMENT SUMMARY:\n")
+cat("  =========================================\n")
+
+hc_samples <- names(disease_map)[disease_map == "Healthy_Control"]
+pd_samples <- names(disease_map)[disease_map == "Parkinsons_Disease"]
+
+cat("  ▶ Healthy Control (", length(hc_samples), " samples):\n    ", 
+    paste(hc_samples, collapse=", "), "\n\n", sep="")
+
+cat("  ▶ Parkinson's Disease (", length(pd_samples), " samples):\n    ", 
+    paste(pd_samples, collapse=", "), "\n\n", sep="")
+
+# Keep the detailed table view just in case you need to check titles
+print(data.frame(geo_id  = names(disease_map),
+                 title   = sample_meta$title,
+                 disease = disease_map))
 # ================================================================================
 #  STEP 2: LOAD DATA + QUALITY CONTROL
 # ================================================================================
@@ -255,10 +285,46 @@ print(VlnPlot(all_filt,
                         theme=theme(plot.title=element_text(face="bold"))))
 dev.off()
 
-saveRDS(seurat_filtered,"objects/01_seurat_qc.rds")
-cat(sprintf("✔ QC done. Total cells: %d\n\n",
-            sum(sapply(seurat_filtered, ncol))))
+# ================================================================================
+# ---> ADD THIS BLOCK: UMAP Before and After QC Filtering
+# ================================================================================
+cat("\n━━━ Generating Combined Before & After QC UMAPs ━━━\n")
+library(patchwork) # For side-by-side plotting
 
+# 1. Process the 'Before QC' merged object
+cat("  Processing Raw Data (This may take a moment due to high cell counts)...\n")
+all_raw <- NormalizeData(all_raw, verbose = FALSE) %>%
+  FindVariableFeatures(verbose = FALSE) %>%
+  ScaleData(verbose = FALSE) %>%
+  RunPCA(verbose = FALSE) %>%
+  RunUMAP(dims = 1:20, verbose = FALSE)
+
+# Generate Before Plot
+p_umap_before <- DimPlot(all_raw, reduction = "umap", group.by = "orig.ident", pt.size = 0.1) +
+  ggtitle("Before QC (Includes Low-Quality Cells)") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+
+# 2. Process the 'After QC' merged object
+cat("  Processing Filtered Data...\n")
+all_filt <- NormalizeData(all_filt, verbose = FALSE) %>%
+  FindVariableFeatures(verbose = FALSE) %>%
+  ScaleData(verbose = FALSE) %>%
+  RunPCA(verbose = FALSE) %>%
+  RunUMAP(dims = 1:20, verbose = FALSE)
+
+# Generate After Plot
+p_umap_after <- DimPlot(all_filt, reduction = "umap", group.by = "orig.ident", pt.size = 0.1) +
+  ggtitle("After QC (Cleaned Cells Only)") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+
+# 3. Save side-by-side comparison to a new PDF
+pdf("results/qc/04_qc_umap_before_after.pdf", width = 12, height = 6)
+print(p_umap_before + p_umap_after)
+dev.off()
+
+cat("    ✔ Before/After QC UMAPs saved to results/qc/04_qc_umap_before_after.pdf\n")
 # ================================================================================
 #  STEP 3: DOUBLET DETECTION (DoubletFinder)
 #  Doublets = two cells in one droplet — creates fake hybrid clusters
@@ -311,6 +377,9 @@ for (s in names(seurat_filtered)) {
   if (!exists("doublet_plots")) doublet_plots <- list()
   doublet_plots[[s]] <- p
   
+  if (!exists("seurat_with_doublets")) seurat_with_doublets <- list()
+  seurat_with_doublets[[s]] <- result
+  
   # NOW throw away the doublets
   before <- ncol(result)
   result <- subset(result, subset=doublet_status=="Singlet")
@@ -322,6 +391,44 @@ for (s in names(seurat_filtered)) {
 pdf("results/doublet/01_doublet_umap.pdf", width=8, height=6)
 for (p in doublet_plots) print(p)
 dev.off()
+cat("━━━ Generating Combined Before & After UMAPs ━━━\n")
+library(patchwork) # Ensure patchwork is loaded for side-by-side plotting
+
+# 1. Merge the 'Before' objects (contains both Doublets and Singlets)
+combined_before <- merge(x = seurat_with_doublets[[1]],
+                         y = seurat_with_doublets[-1],
+                         add.cell.ids = names(seurat_with_doublets))
+
+# 2. Process the merged object to generate a single, shared UMAP space
+combined_before <- NormalizeData(combined_before, verbose=FALSE) %>%
+  FindVariableFeatures(verbose=FALSE) %>%
+  ScaleData(verbose=FALSE) %>%
+  RunPCA(verbose=FALSE) %>%
+  RunUMAP(dims=1:20, verbose=FALSE)
+
+# 3. Create the 'Before' Plot across all samples
+p_combined_before <- DimPlot(combined_before, group.by="doublet_status", 
+                             cols=c(Doublet="red", Singlet="grey80"), pt.size=0.1) +
+  ggtitle("Whole Dataset: Before Removal") +
+  theme_classic()
+
+# 4. Create the 'After' Plot 
+# We subset the merged object here instead of merging 'seurat_clean'. 
+# This guarantees the UMAP coordinates stay exactly the same, 
+# so you just see the red dots disappear!
+combined_after <- subset(combined_before, subset = doublet_status == "Singlet")
+
+p_combined_after <- DimPlot(combined_after, group.by="doublet_status", 
+                            cols=c(Singlet="grey80"), pt.size=0.1) +
+  ggtitle("Whole Dataset: After Removal") +
+  theme_classic()
+
+# 5. Save the combined plots side-by-side
+pdf("results/doublet/02_combined_before_after_umap.pdf", width=12, height=6)
+print(p_combined_before + p_combined_after)
+dev.off()
+
+cat(" ✔ Combined Before/After UMAPs saved.\n")
 # ================================================================================
 #  STEP 4: CELL CYCLE SCORING
 #  Cell cycle phases can drive clustering — we score and regress them out
@@ -638,9 +745,9 @@ library(dplyr)
 library(ggplot2)
 library(patchwork) # Added this so wrap_plots works!
 
-CHOSEN_RES <- 0.6
+CHOSEN_RES <- 0.4
 N_CORES    <- 10
-N_PCS      <- 30  # Added this so your titles don't error out!
+N_PCS      <- 15  # Added this so your titles don't error out!
 
 seu <- readRDS("objects/07_integrated_checkpoint.rds")
 # ========================
@@ -850,8 +957,104 @@ print(DotPlot(seu, features=valid_markers, cols=c("lightgrey", "red")) +
 dev.off()
 cat("  ✔ Saved: results/annotation/03_dotplot_known_markers.pdf\n")
 # ==============================================================================
+# 1. Extend timeout again just in case
+options(timeout = 600)
 
+# 2. Re-initialize BiocManager
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+# 3. Try to install the dependencies individually
+# If it asks "Update all/some/none?", type 'n' for None.
+# If it asks "Do you want to install from source?", type 'n' for No.
+BiocManager::install("DirichletMultinomial", update = FALSE, type = "binary")
+BiocManager::install("TFBSTools", update = FALSE, type = "binary")
+# ==============================================================================
+# STEP 9.2: AZIMUTH ANNOTATION (Motor Cortex Reference)
+# ==============================================================================
+cat("━━━ Running Azimuth Annotation ━━━\n")
+
+# 1. Run Azimuth (Downloads reference automatically if not present)
+suppressMessages(library(Azimuth))
+suppressMessages(library(SeuratData))
+seu <- RunAzimuth(seu, reference = "humanmotorcortex")
+
+# 2. Calculate the Majority Vote per Cluster (Matches your SingleR logic)
+azimuth_anno <- data.frame(
+  Cluster = as.character(Idents(seu)),
+  Label = as.character(seu$predicted.id),
+  stringsAsFactors = FALSE
+)
+
+azimuth_majority <- azimuth_anno %>%
+  dplyr::group_by(Cluster, Label) %>%
+  dplyr::tally() %>%
+  dplyr::slice_max(order_by = n, n = 1, with_ties = FALSE)
+
+# 3. Map the clean labels back to every cell
+seu$Azimuth_Majority <- azimuth_majority$Label[match(as.character(Idents(seu)), azimuth_majority$Cluster)]
+
+# 4. Save the Clean UMAP
+pdf("results/annotation/04_umap_azimuth_majority.pdf", width=14, height=10)
+print(DimPlot(seu, group.by="Azimuth_Majority", label=TRUE, repel=TRUE, pt.size=0.3) +
+        ggtitle("Azimuth Annotations (Human Motor Cortex Majority Vote)") +
+        theme_classic() + NoLegend())
+dev.off()
+
+cat("  ✔ Saved: results/annotation/04_umap_azimuth_majority.pdf\n")
 #manually clustering for the parkinsins dataset 202210 by me
+
+
+
+
+# ==============================================================================
+# VISUALIZING PARKINSON'S DISEASE BIOMARKERS
+# ==============================================================================
+cat("━━━ Generating PD Biomarker Plots ━━━\n")
+
+# 1. Define the core PD biomarkers 
+pd_markers <- c(
+  "TH", "SLC6A3", "KCNJ6",  # Dopaminergic Neurons (Substantia Nigra A9)
+  "AIF1", "HLA-DRA",        # Reactive Microglia / Inflammation
+  "GFAP", "S100B",          # Astrocytes
+  "SNCA", "LRRK2"           # Core PD Genetic Risk Factors
+)
+
+# 2. Safety check: Only plot genes that survived QC and exist in your Seurat object
+# This prevents the script from crashing if a gene was filtered out earlier.
+valid_pd_markers <- intersect(pd_markers, rownames(seu))
+cat("  Found", length(valid_pd_markers), "out of", length(pd_markers), "PD markers in the dataset.\n")
+
+# 3. Create a grid of UMAPs, one for each gene
+# Note: 'order = TRUE' is crucial here. It forces Seurat to draw the red (expressing) 
+# cells on top of the grey cells, preventing them from being hidden in dense clusters.
+pdf("results/annotation/05_PD_biomarker_featureplots.pdf", width = 16, height = 12)
+p_feat <- FeaturePlot(seu, 
+                      features = valid_pd_markers, 
+                      cols = c("grey90", "red3"), 
+                      ncol = 3, 
+                      pt.size = 0.5, 
+                      order = TRUE, 
+                      label = TRUE, 
+                      repel = TRUE)
+print(p_feat)
+dev.off()
+
+# 4. Create Violin Plots for quantitative visualization across clusters
+# Note: 'pt.size = 0' removes the individual black dots so you can clearly see the violin shape.
+pdf("results/annotation/06_PD_biomarker_violins.pdf", width = 16, height = 12)
+p_vln <- VlnPlot(seu, 
+                 features = valid_pd_markers, 
+                 pt.size = 0, 
+                 ncol = 3)
+print(p_vln)
+dev.off()
+
+cat("  ✔ Saved FeaturePlots: results/annotation/05_PD_biomarker_featureplots.pdf\n")
+cat("  ✔ Saved VlnPlots: results/annotation/06_PD_biomarker_violins.pdf\n")
+
+
+
 
 
 # ==============================================================================
@@ -944,7 +1147,7 @@ library(patchwork) # Added this so wrap_plots works!
 
 CHOSEN_RES <- 0.6
 N_CORES    <- 10
-N_PCS      <- 30  # Added this so your titles don't error out!
+N_PCS      <- 15  # Added this so your titles don't error out!
 
 #all library
 suppressPackageStartupMessages({
@@ -1343,19 +1546,6 @@ cat(sprintf("  Pseudobulk DEGs       : %d\n",  n_sig_total))
 cat(sprintf("  Up in PD              : %d\n",  nrow(deg_up)))
 cat(sprintf("  Up in HC              : %d\n\n",nrow(deg_down)))
 
-cat("📋 METHODS SECTION (UPDATED FOR YOUR PROJECT):\n")
-cat("─────────────────────────────────────────────\n")
-cat("  Raw count matrices (GSE202210) were quality-filtered per cell\n")
-cat("  (200–6000 genes, <20% mitochondrial reads, >500 total counts).\n")
-cat("  Doublets were removed (DoubletFinder). Cell cycle scores were\n")
-cat("  regressed during scaling. Log-normalization and Harmony integration\n")
-cat("  were applied. Cell types were manually annotated using canonical\n")
-cat("  brain markers based on robust DotPlot expression. Differential\n")
-cat("  expression was performed using pseudobulk aggregation per patient\n")
-cat("  followed by DESeq2 to avoid pseudoreplication. Trajectory analysis\n")
-cat("  was performed with Monocle3, setting Oligodendrocyte Precursor\n")
-cat("  Cells (OPCs) as the biological root to map myelin maturation.\n")
-cat("─────────────────────────────────────────────\n\n")
 
 # Save final absolute backup
 saveRDS(seu, "objects/10_seurat_FINISHED.rds")
@@ -1364,10 +1554,32 @@ cat("💾 FINAL OBJECT SAVED: objects/10_seurat_FINISHED.rds\n")
 
 
 
+ 
+# 1. Install BiocManager (required for heavy bioinformatics packages)
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+# 2. Install the tricky underlying packages that Azimuth relies on
+BiocManager::install(c("ComplexHeatmap", "glmGamPoi"), update = FALSE)
+
+# 3. Force a fresh install of the Satija Lab packages
+remotes::install_github("satijalab/seurat-data", force = TRUE)
+remotes::install_github("satijalab/azimuth", force = TRUE)
 
 
 
+##### mess for Azimuth  ##########
+# 1. Install 'remotes' if you don't already have it
+if (!requireNamespace("remotes", quietly = TRUE)) {
+  install.packages("remotes")
+}
 
+# 2. Install SeuratData (required to download the reference atlases)
+remotes::install_github("satijalab/seurat-data")
+
+# 3. Install Azimuth
+remotes::install_github("satijalab/azimuth")
 
 
 
