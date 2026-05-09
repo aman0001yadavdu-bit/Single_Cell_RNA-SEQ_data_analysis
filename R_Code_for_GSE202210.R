@@ -285,9 +285,6 @@ print(VlnPlot(all_filt,
                         theme=theme(plot.title=element_text(face="bold"))))
 dev.off()
 
-# ================================================================================
-# ---> ADD THIS BLOCK: UMAP Before and After QC Filtering
-# ================================================================================
 cat("\n━━━ Generating Combined Before & After QC UMAPs ━━━\n")
 library(patchwork) # For side-by-side plotting
 
@@ -1554,7 +1551,7 @@ cat("💾 FINAL OBJECT SAVED: objects/10_seurat_FINISHED.rds\n")
 
 
 
- 
+
 # 1. Install BiocManager (required for heavy bioinformatics packages)
 if (!requireNamespace("BiocManager", quietly = TRUE)) {
   install.packages("BiocManager")
