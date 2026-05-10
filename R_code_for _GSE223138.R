@@ -1,4 +1,3 @@
-
 #  Dataset  : GSE223138(Parkinson's Disease vs Healthy Control)
 
 # ================================================================================
@@ -178,87 +177,75 @@ CHOSEN_RES    <- 0.6    # look at results/clustering/01_umap_all_resolutions.pdf
 # ================================================================================
 cat("━━━ STEP 2: Load Data + QC ━━━\n")
 
-# Get the names of the 34 folders we created in Step 1
-prefixes <- list.dirs("data", full.names=FALSE, recursive=FALSE)
-if (length(prefixes) == 0) stop("No folders found in 'data'. Did Step 1 finish?")
+# Build GSM → disease lookup from metadata
+gsm_disease <- setNames(disease_map, names(disease_map))
 
 seurat_raw <- list()
-
 for (pfx in prefixes) {
   sdir  <- file.path("data", pfx)
-  
-  # Extract the GSM ID (e.g., "GSM5602315") and the short name (e.g., "A10")
-  parts  <- strsplit(pfx, "_")[[1]]
-  gsm_id <- parts[1]
-  sname  <- ifelse(length(parts) > 1, parts[2], gsm_id)
-  
+  sname <- gsub("^GSM[0-9]+_","", pfx)     # short biological name
+  gsm_id <- regmatches(pfx, regexpr("GSM[0-9]+", pfx))  # e.g. GSM6106340
   cat("  Loading:", sname, "...")
   
   tryCatch({
     counts <- Read10X(data.dir=sdir)
     if (is.list(counts)) counts <- counts[[1]]
-    
-    # Create the raw Seurat object
     obj <- CreateSeuratObject(counts=counts, project=sname,
                               min.cells=3, min.features=200)
     
-    # ── THE MAGIC: Apply the perfect labels we just verified ──
+    # ── FIX 3: assign disease from GEO metadata ───────────────────────────────
     obj$sample  <- sname
     obj$gsm_id  <- gsm_id
-    
-    # Match the GSM ID to our disease_map from Step 1
-    if (gsm_id %in% names(disease_map)) {
-      obj$disease <- disease_map[[gsm_id]]
-    } else {
-      obj$disease <- "Unknown"
-      cat(" ⚠ Label missing!")
-    }
+    obj$disease <- if (gsm_id %in% names(gsm_disease))
+      gsm_disease[[gsm_id]]
+    else
+      ifelse(grepl("HC", sname, ignore.case=TRUE),
+             "Healthy_Control", "Parkinsons_Disease")
     
     seurat_raw[[sname]] <- obj
     cat(" ✔", ncol(obj), "cells |", obj$disease[1], "\n")
   }, error=function(e) cat(" ✘ FAILED:", e$message, "\n"))
 }
-
-# Print the overall breakdown
-cat("\n  Total raw cells loaded:", sum(sapply(seurat_raw, ncol)), "\n")
-cat("  Disease breakdown across all cells:\n")
+cat("  Total cells:", sum(sapply(seurat_raw, ncol)), "\n")
+cat("  Disease breakdown:\n")
 print(table(sapply(seurat_raw, function(x) x$disease[1])))
 
-# ── QC METRICS & PLOTTING ───────────────────────────────────────────────────
-cat("\n  Calculating QC metrics (Mitochondrial %)...\n")
-
-# Calculate Mitochondrial %
+# Mitochondrial %
 seurat_raw <- lapply(seurat_raw, function(seu) {
   seu[["percent.mt"]] <- PercentageFeatureSet(seu, pattern="^MT-"); seu
 })
 
-# Create results folders
-dir.create("results/qc", recursive=TRUE, showWarnings=FALSE)
-
-# Combine briefly just for the "Before" plot
-all_raw <- merge(seurat_raw[[1]], y=seurat_raw[-1], add.cell.ids=names(seurat_raw))
-
+# QC plots BEFORE filtering
 pdf("results/qc/01_combined_violin_before.pdf", width=14, height=5)
-print(VlnPlot(all_raw, features=c("nFeature_RNA","nCount_RNA","percent.mt"),
+all_raw <- merge(seurat_raw[[1]], y=seurat_raw[-1],
+                 add.cell.ids=names(seurat_raw))
+print(VlnPlot(all_raw,
+              features=c("nFeature_RNA","nCount_RNA","percent.mt"),
               ncol=3, pt.size=0, group.by="orig.ident") +
-        plot_annotation(title="QC — All Samples BEFORE Filtering",
+        plot_annotation(title="QC — All Samples Before Filtering",
                         theme=theme(plot.title=element_text(face="bold"))))
 dev.off()
-cat("  ✔ Saved: results/qc/01_combined_violin_before.pdf\n")
 
-# ── FILTERING ───────────────────────────────────────────────────────────────
-# Note: Using your thresholds defined at the top of your script
-cat(sprintf("\n  Filtering: genes %d–%d | MT <%.0f%% | counts >%d\n",
+pdf("results/qc/02_scatter_qc.pdf", width=10, height=5)
+for (s in names(seurat_raw)) {
+  tryCatch({
+    p1 <- FeatureScatter(seurat_raw[[s]],"nCount_RNA","nFeature_RNA") + ggtitle(s)
+    p2 <- FeatureScatter(seurat_raw[[s]],"nCount_RNA","percent.mt")   + ggtitle(s)
+    print(p1 + p2)
+  }, error=function(e) NULL)
+}
+dev.off()
+
+# Filter
+cat(sprintf("\n  Thresholds: genes %d–%d | MT <%.0f%% | counts >%d\n",
             MIN_FEATURES, MAX_FEATURES, MAX_MT, MIN_COUNTS))
-
-seurat_filtered <- lapply(seurat_raw, function(seu) {
+seurat_filtered <- lapply(seurat_raw, function(seu)
   subset(seu, subset = nFeature_RNA > MIN_FEATURES &
            nFeature_RNA < MAX_FEATURES &
            percent.mt   < MAX_MT       &
-           nCount_RNA   > MIN_COUNTS)
-})
+           nCount_RNA   > MIN_COUNTS))
 
-# ── FILTERING SUMMARY ───────────────────────────────────────────────────────
+cat("  After QC:\n")
 qc_df <- data.frame(
   sample       = names(seurat_filtered),
   disease      = sapply(seurat_filtered, function(x) x$disease[1]),
@@ -267,29 +254,57 @@ qc_df <- data.frame(
   median_genes = sapply(seurat_filtered, function(x) round(median(x$nFeature_RNA))),
   median_mt    = sapply(seurat_filtered, function(x) round(median(x$percent.mt),1))
 )
-
-cat("\n  --- After QC Summary ---\n")
-print(head(qc_df))
+print(qc_df)
 write.csv(qc_df,"results/qc/qc_summary.csv", row.names=FALSE)
 
-# Plot "After" QC
-all_filt <- merge(seurat_filtered[[1]], y=seurat_filtered[-1], add.cell.ids=names(seurat_filtered))
-
+# QC plots AFTER filtering
 pdf("results/qc/03_combined_violin_after.pdf", width=14, height=5)
-print(VlnPlot(all_filt, features=c("nFeature_RNA","nCount_RNA","percent.mt"),
+all_filt <- merge(seurat_filtered[[1]], y=seurat_filtered[-1],
+                  add.cell.ids=names(seurat_filtered))
+print(VlnPlot(all_filt,
+              features=c("nFeature_RNA","nCount_RNA","percent.mt"),
               ncol=3, pt.size=0, group.by="orig.ident") +
-        plot_annotation(title="QC — All Samples AFTER Filtering",
+        plot_annotation(title="QC — All Samples After Filtering",
                         theme=theme(plot.title=element_text(face="bold"))))
 dev.off()
-cat("  ✔ Saved: results/qc/03_combined_violin_after.pdf\n")
 
-# Save the checkpoint
-dir.create("objects", showWarnings=FALSE)
-saveRDS(seurat_filtered,"objects/01_seurat_qc.rds")
+cat("\n━━━ Generating Combined Before & After QC UMAPs ━━━\n")
+library(patchwork) # For side-by-side plotting
 
-cat(sprintf("\n✔ Step 2 QC Complete! Total cells surviving QC: %d\n\n",
-            sum(sapply(seurat_filtered, ncol))))
+# 1. Process the 'Before QC' merged object
+cat("  Processing Raw Data (This may take a moment due to high cell counts)...\n")
+all_raw <- NormalizeData(all_raw, verbose = FALSE) %>%
+  FindVariableFeatures(verbose = FALSE) %>%
+  ScaleData(verbose = FALSE) %>%
+  RunPCA(verbose = FALSE) %>%
+  RunUMAP(dims = 1:20, verbose = FALSE)
 
+# Generate Before Plot
+p_umap_before <- DimPlot(all_raw, reduction = "umap", group.by = "orig.ident", pt.size = 0.1) +
+  ggtitle("Before QC (Includes Low-Quality Cells)") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+
+# 2. Process the 'After QC' merged object
+cat("  Processing Filtered Data...\n")
+all_filt <- NormalizeData(all_filt, verbose = FALSE) %>%
+  FindVariableFeatures(verbose = FALSE) %>%
+  ScaleData(verbose = FALSE) %>%
+  RunPCA(verbose = FALSE) %>%
+  RunUMAP(dims = 1:20, verbose = FALSE)
+
+# Generate After Plot
+p_umap_after <- DimPlot(all_filt, reduction = "umap", group.by = "orig.ident", pt.size = 0.1) +
+  ggtitle("After QC (Cleaned Cells Only)") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+
+# 3. Save side-by-side comparison to a new PDF
+pdf("results/qc/04_qc_umap_before_after.pdf", width = 12, height = 6)
+print(p_umap_before + p_umap_after)
+dev.off()
+
+cat("    ✔ Before/After QC UMAPs saved to results/qc/04_qc_umap_before_after.pdf\n")
 # ================================================================================
 #  STEP 3: DOUBLET DETECTION (DoubletFinder)
 #  Doublets = two cells in one droplet — creates fake hybrid clusters
@@ -342,6 +357,9 @@ for (s in names(seurat_filtered)) {
   if (!exists("doublet_plots")) doublet_plots <- list()
   doublet_plots[[s]] <- p
   
+  if (!exists("seurat_with_doublets")) seurat_with_doublets <- list()
+  seurat_with_doublets[[s]] <- result
+  
   # NOW throw away the doublets
   before <- ncol(result)
   result <- subset(result, subset=doublet_status=="Singlet")
@@ -353,7 +371,48 @@ for (s in names(seurat_filtered)) {
 pdf("results/doublet/01_doublet_umap.pdf", width=8, height=6)
 for (p in doublet_plots) print(p)
 dev.off()
+cat("━━━ Generating Combined Before & After UMAPs ━━━\n")
+library(patchwork) # Ensure patchwork is loaded for side-by-side plotting
 
+# 1. Merge the 'Before' objects (contains both Doublets and Singlets)
+combined_before <- merge(x = seurat_with_doublets[[1]],
+                         y = seurat_with_doublets[-1],
+                         add.cell.ids = names(seurat_with_doublets))
+
+# 2. Process the merged object to generate a single, shared UMAP space
+combined_before <- NormalizeData(combined_before, verbose=FALSE) %>%
+  FindVariableFeatures(verbose=FALSE) %>%
+  ScaleData(verbose=FALSE) %>%
+  RunPCA(verbose=FALSE) %>%
+  RunUMAP(dims=1:20, verbose=FALSE)
+
+# 3. Create the 'Before' Plot across all samples
+p_combined_before <- DimPlot(combined_before, group.by="doublet_status", 
+                             cols=c(Doublet="red", Singlet="grey80"), pt.size=0.1) +
+  ggtitle("Whole Dataset: Before Removal") +
+  theme_classic()
+
+# 4. Create the 'After' Plot 
+# We subset the merged object here instead of merging 'seurat_clean'. 
+# This guarantees the UMAP coordinates stay exactly the same, 
+# so you just see the red dots disappear!
+combined_after <- subset(combined_before, subset = doublet_status == "Singlet")
+
+p_combined_after <- DimPlot(combined_after, group.by="doublet_status", 
+                            cols=c(Singlet="grey80"), pt.size=0.1) +
+  ggtitle("Whole Dataset: After Removal") +
+  theme_classic()
+
+# 5. Save the combined plots side-by-side
+pdf("results/doublet/02_combined_before_after_umap.pdf", width=12, height=6)
+print(p_combined_before + p_combined_after)
+dev.off()
+
+cat(" ✔ Combined Before/After UMAPs saved.\n")
+
+
+rm(all_filt,all_raw,combined_after,combined_before,doublet_plots,qc_df)
+gc()
 
 # ================================================================================
 #  STEP 4: CELL CYCLE SCORING
@@ -531,7 +590,8 @@ cat("  ✔ Saved: results/integration/02_umap_after_integration.pdf\n")
 
 
 
-
+rm(p,p_combined_after,p_combined_before,p1,p2,seurat_with_doublets,seurat_raw)
+gc()
 
 # ── FIX 5: LISI on Harmony embeddings (correct space) ────────────────────────
 cat("  Computing LISI on Harmony embeddings (correct space)...\n")
@@ -720,7 +780,7 @@ library(dplyr)
 library(ggplot2)
 library(patchwork) # Added this so wrap_plots works!
 
-CHOSEN_RES <- 0.6
+CHOSEN_RES <- 0.2
 N_CORES    <- 10
 N_PCS      <- 15  # Added this so your titles don't error out!
 
@@ -920,13 +980,44 @@ dev.off()
 cat("  ✔ Saved: results/annotation/02_umap_singler_majority.pdf\n")
 
 # 10. Known Markers DotPlot (Verification Step)
-cat("  Generating DotPlot of known markers...\n")
-known_markers <- c("TH", "SLC6A3", "DDC", "ALDH1A1",   # Dopaminergic
-                   "SLC17A6", "SLC17A7",               # Glutamatergic
-                   "GAD1", "GAD2",                     # GABAergic
-                   "PTPRC", "CD14", "AIF1",            # Immune/Microglia
-                   "GFAP", "S100B")                    # Astrocytes
-
+cat("  Generating DotPlot of brain-specific known markers...\n")
+known_markers <- c(
+  # 1 Astrocytes
+  "GFAP", "AQP4", "ALDH1L1",
+  
+  # 2 Microglia
+  "CX3CR1", "C1QA", "TREM2",
+  
+  # 3 Oligodendrocytes
+  "MBP", "PLP1", "MOG",
+  
+  # 4 Oligodendrocyte Precursor Cells (OPCs)
+  "PDGFRA", "CSPG4", "SOX10",
+  
+  # 5 Endothelial cells
+  "PECAM1", "CLDN5", "FLT1",
+  
+  # 6 Pericytes
+  "PDGFRB", "VTN", "RGS5",
+  
+  # 7 Ependymal cells
+  "FOXJ1", "CCDC39", "PIFO",
+  
+  # 8 Pan-Neurons
+  "RBFOX3", "SNAP25", "MAP2",
+  
+  # 9 Glutamatergic (Excitatory) neurons
+  "SLC17A7", "CAMK2A", "GRIN1",
+  
+  # 10 GABAergic (Inhibitory) neurons
+  "GAD1", "GAD2", "PVALB",
+  
+  # 11 Dopaminergic neurons
+  "TH", "SLC6A3", "DDC",
+  
+  # 12 T cells (Included to check for peripheral immune infiltration)
+  "CD3D", "CD3E", "IL7R"
+)
 # Ensure we only plot genes that actually exist to prevent errors
 valid_markers <- intersect(known_markers, rownames(seu))
 
@@ -950,23 +1041,10 @@ cat("━━━ STEP 9.5: Finalizing Presentation UMAP ━━━\n")
 seu$Manual_CellType <- as.character(seu$seurat_clusters)
 
 # 2. Assign the names we already verified
-seu$Manual_CellType[seu$Manual_CellType %in% c("5", "20", "24")] <- "Microglia"
-seu$Manual_CellType[seu$Manual_CellType %in% c("2", "23", "25")] <- "Astrocyte"
-seu$Manual_CellType[seu$Manual_CellType %in% c("6", "8", "9", "11", "13", "14")] <- "GABAergic Neuron"
-seu$Manual_CellType[seu$Manual_CellType %in% c("3", "7", "10", "15", "16")] <- "Glutamatergic Neuron"
-
-# 3. NEW: Assign the remaining major brain cells to clean up the numbers
-# 🟣 Oligodendrocytes (The massive 0, 1, 4 island)
-seu$Manual_CellType[seu$Manual_CellType %in% c("0", "1", "4")] <- "Oligodendrocyte"
-
-# 🟤 OPCs (Oligodendrocyte Precursor Cells)
-seu$Manual_CellType[seu$Manual_CellType %in% c("12", "18", "19")] <- "OPC"
-
-# 🟡 Endothelial Cells (Blood vessels - Cluster 21)
-seu$Manual_CellType[seu$Manual_CellType %in% c("21")] <- "Endothelial"
-
-# ⚪ Catch-all for any tiny remaining numbers (so the plot looks clean)
-seu$Manual_CellType[seu$Manual_CellType %in% c("17", "22")] <- "Other/Mixed"
+seu$Manual_CellType[seu$Manual_CellType %in% c("2")] <- "Oligodendrocytes"
+seu$Manual_CellType[seu$Manual_CellType %in% c("0","1","7","8","9")] <- "T cells"
+seu$Manual_CellType[seu$Manual_CellType %in% c("10")] <- "endothelial"
+seu$Manual_CellType[seu$Manual_CellType %in% c("5", "6","3","4")] <- "other/mixed"
 
 # 4. Set these new names as the Default
 Idents(seu) <- "Manual_CellType"
@@ -981,15 +1059,43 @@ cat("  ✔ Saved: results/annotation/04_umap_manual_annotation_FINAL.pdf\n")
 
 # 6. EXPANDED DotPlot to mathematically prove the new names
 cat("  Generating Expanded DotPlot to verify new clusters...\n")
-expanded_markers <- c("TH", "SLC6A3",                        # Dopaminergic
-                      "SLC17A7", "SLC17A6",                  # Glutamatergic
-                      "GAD1", "GAD2",                        # GABAergic
-                      "PTPRC", "AIF1",                       # Microglia
-                      "GFAP", "S100B",                       # Astrocytes
-                      "MBP", "PLP1", "MOG",                  # NEW: Oligodendrocytes
-                      "PDGFRA", "CSPG4",                     # NEW: OPCs
-                      "CLDN5", "VWF")                        # NEW: Endothelial
-
+expanded_markers <- c(
+  # 1 Astrocytes
+  "GFAP", "AQP4", "ALDH1L1",
+  
+  # 2 Microglia
+  "CX3CR1", "C1QA", "TREM2",
+  
+  # 3 Oligodendrocytes
+  "MBP", "PLP1", "MOG",
+  
+  # 4 Oligodendrocyte Precursor Cells (OPCs)
+  "PDGFRA", "CSPG4", "SOX10",
+  
+  # 5 Endothelial cells
+  "PECAM1", "CLDN5", "FLT1",
+  
+  # 6 Pericytes
+  "PDGFRB", "VTN", "RGS5",
+  
+  # 7 Ependymal cells
+  "FOXJ1", "CCDC39", "PIFO",
+  
+  # 8 Pan-Neurons
+  "RBFOX3", "SNAP25", "MAP2",
+  
+  # 9 Glutamatergic (Excitatory) neurons
+  "SLC17A7", "CAMK2A", "GRIN1",
+  
+  # 10 GABAergic (Inhibitory) neurons
+  "GAD1", "GAD2", "PVALB",
+  
+  # 11 Dopaminergic neurons
+  "TH", "SLC6A3", "DDC",
+  
+  # 12 T cells (Included to check for peripheral immune infiltration)
+  "CD3D", "CD3E", "IL7R"
+)
 valid_expanded <- intersect(expanded_markers, rownames(seu))
 
 pdf("results/annotation/05_dotplot_expanded_proof.pdf", width=14, height=8)
