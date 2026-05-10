@@ -742,7 +742,7 @@ library(dplyr)
 library(ggplot2)
 library(patchwork) # Added this so wrap_plots works!
 
-CHOSEN_RES <- 0.4
+CHOSEN_RES <- 0.2
 N_CORES    <- 10
 N_PCS      <- 15  # Added this so your titles don't error out!
 
@@ -751,6 +751,13 @@ seu <- readRDS("objects/07_integrated_checkpoint.rds")
 
 
 
+# ── CREATE FOLDERS ────────────────────────────────────────────────────────────
+for (d in c("data","objects",
+            "results/qc","results/doublet","results/cellcycle",
+            "results/integration","results/processing",
+            "results/clustering","results/annotation",
+            "results/trajectory","results/DEG"))
+  dir.create(d, recursive=TRUE, showWarnings=FALSE)
 
 
 
@@ -872,8 +879,6 @@ cat("  ✔ Saved: results/clustering/04_marker_dotplot.pdf\n")
 
 write.csv(as.data.frame(table(seu$seurat_clusters)),
           "results/clustering/cells_per_cluster.csv", row.names=FALSE)
-saveRDS(seu,"objects/05_seurat_clustered.rds")
-cat(sprintf("✔ Clustering done. %d clusters.\n\n", n_clust))
 
 
 # ==============================================================================
@@ -937,17 +942,48 @@ dev.off()
 cat("  ✔ Saved: results/annotation/02_umap_singler_majority.pdf\n")
 
 # 10. Known Markers DotPlot (Verification Step)
-cat("  Generating DotPlot of known markers...\n")
-known_markers <- c("TH", "SLC6A3", "DDC", "ALDH1A1",   # Dopaminergic
-                   "SLC17A6", "SLC17A7",               # Glutamatergic
-                   "GAD1", "GAD2",                     # GABAergic
-                   "PTPRC", "CD14", "AIF1",            # Immune/Microglia
-                   "GFAP", "S100B")                    # Astrocytes
-
+cat("  Generating DotPlot of brain-specific known markers...\n")
+known_markers <- c(
+  # 1 Astrocytes
+  "GFAP", "AQP4", "ALDH1L1",
+  
+  # 2 Microglia
+  "CX3CR1", "C1QA", "TREM2",
+  
+  # 3 Oligodendrocytes
+  "MBP", "PLP1", "MOG",
+  
+  # 4 Oligodendrocyte Precursor Cells (OPCs)
+  "PDGFRA", "CSPG4", "SOX10",
+  
+  # 5 Endothelial cells
+  "PECAM1", "CLDN5", "FLT1",
+  
+  # 6 Pericytes
+  "PDGFRB", "VTN", "RGS5",
+  
+  # 7 Ependymal cells
+  "FOXJ1", "CCDC39", "PIFO",
+  
+  # 8 Pan-Neurons
+  "RBFOX3", "SNAP25", "MAP2",
+  
+  # 9 Glutamatergic (Excitatory) neurons
+  "SLC17A7", "CAMK2A", "GRIN1",
+  
+  # 10 GABAergic (Inhibitory) neurons
+  "GAD1", "GAD2", "PVALB",
+  
+  # 11 Dopaminergic neurons
+  "TH", "SLC6A3", "DDC",
+  
+  # 12 T cells (Included to check for peripheral immune infiltration)
+  "CD3D", "CD3E", "IL7R"
+)
 # Ensure we only plot genes that actually exist to prevent errors
 valid_markers <- intersect(known_markers, rownames(seu))
 
-pdf("results/annotation/03_dotplot_known_markers.pdf", width=12, height=8)
+pdf("results/annotation/03_dotplot_known_markers.pdf", width=22, height=10)
 print(DotPlot(seu, features=valid_markers, cols=c("lightgrey", "red")) + 
         RotatedAxis() + 
         ggtitle("Expression of Known Brain Markers per Cluster"))
@@ -1063,23 +1099,18 @@ cat("━━━ STEP 9.5: Finalizing Presentation UMAP ━━━\n")
 seu$Manual_CellType <- as.character(seu$seurat_clusters)
 
 # 2. Assign the names we already verified
-seu$Manual_CellType[seu$Manual_CellType %in% c("5", "20", "24")] <- "Microglia"
-seu$Manual_CellType[seu$Manual_CellType %in% c("2", "23", "25")] <- "Astrocyte"
-seu$Manual_CellType[seu$Manual_CellType %in% c("6", "8", "9", "11", "13", "14")] <- "GABAergic Neuron"
-seu$Manual_CellType[seu$Manual_CellType %in% c("3", "7", "10", "15", "16")] <- "Glutamatergic Neuron"
+seu$Manual_CellType[seu$Manual_CellType %in% c("0")] <- "Oligodendrocytes"
+seu$Manual_CellType[seu$Manual_CellType %in% c("2")] <- "Astrocyte"
+seu$Manual_CellType[seu$Manual_CellType %in% c("3")] <- "Microglia"
+seu$Manual_CellType[seu$Manual_CellType %in% c("4")] <- "Oligodendrocytes precursor"
+seu$Manual_CellType[seu$Manual_CellType %in% c("1", "7", "6", "8")] <- "Glutamatergic Neuron"
+seu$Manual_CellType[seu$Manual_CellType %in% c("5", "9")] <- "GABAergic"
+seu$Manual_CellType[seu$Manual_CellType %in% c("11")] <- "Pericyte"
+seu$Manual_CellType[seu$Manual_CellType %in% c("12")] <- "T cells"
+seu$Manual_CellType[seu$Manual_CellType %in% c("14")] <- "endothelial"
+seu$Manual_CellType[seu$Manual_CellType %in% c("10", "13")] <- "other/mixed"
 
-# 3. NEW: Assign the remaining major brain cells to clean up the numbers
-# 🟣 Oligodendrocytes (The massive 0, 1, 4 island)
-seu$Manual_CellType[seu$Manual_CellType %in% c("0", "1", "4")] <- "Oligodendrocyte"
 
-# 🟤 OPCs (Oligodendrocyte Precursor Cells)
-seu$Manual_CellType[seu$Manual_CellType %in% c("12", "18", "19")] <- "OPC"
-
-# 🟡 Endothelial Cells (Blood vessels - Cluster 21)
-seu$Manual_CellType[seu$Manual_CellType %in% c("21")] <- "Endothelial"
-
-# ⚪ Catch-all for any tiny remaining numbers (so the plot looks clean)
-seu$Manual_CellType[seu$Manual_CellType %in% c("17", "22")] <- "Other/Mixed"
 
 # 4. Set these new names as the Default
 Idents(seu) <- "Manual_CellType"
@@ -1094,67 +1125,52 @@ cat("  ✔ Saved: results/annotation/04_umap_manual_annotation_FINAL.pdf\n")
 
 # 6. EXPANDED DotPlot to mathematically prove the new names
 cat("  Generating Expanded DotPlot to verify new clusters...\n")
-expanded_markers <- c("TH", "SLC6A3",                        # Dopaminergic
-                      "SLC17A7", "SLC17A6",                  # Glutamatergic
-                      "GAD1", "GAD2",                        # GABAergic
-                      "PTPRC", "AIF1",                       # Microglia
-                      "GFAP", "S100B",                       # Astrocytes
-                      "MBP", "PLP1", "MOG",                  # NEW: Oligodendrocytes
-                      "PDGFRA", "CSPG4",                     # NEW: OPCs
-                      "CLDN5", "VWF")                        # NEW: Endothelial
-
+expanded_markers <- c(
+  # 1 Astrocytes
+  "GFAP", "AQP4", "ALDH1L1",
+  
+  # 2 Microglia
+  "CX3CR1", "C1QA", "TREM2",
+  
+  # 3 Oligodendrocytes
+  "MBP", "PLP1", "MOG",
+  
+  # 4 Oligodendrocyte Precursor Cells (OPCs)
+  "PDGFRA", "CSPG4", "SOX10",
+  
+  # 5 Endothelial cells
+  "PECAM1", "CLDN5", "FLT1",
+  
+  # 6 Pericytes
+  "PDGFRB", "VTN", "RGS5",
+  
+  # 7 Ependymal cells
+  "FOXJ1", "CCDC39", "PIFO",
+  
+  # 8 Pan-Neurons
+  "RBFOX3", "SNAP25", "MAP2",
+  
+  # 9 Glutamatergic (Excitatory) neurons
+  "SLC17A7", "CAMK2A", "GRIN1",
+  
+  # 10 GABAergic (Inhibitory) neurons
+  "GAD1", "GAD2", "PVALB",
+  
+  # 11 Dopaminergic neurons
+  "TH", "SLC6A3", "DDC",
+  
+  # 12 T cells (Included to check for peripheral immune infiltration)
+  "CD3D", "CD3E", "IL7R"
+)
 valid_expanded <- intersect(expanded_markers, rownames(seu))
 
-pdf("results/annotation/05_dotplot_expanded_proof.pdf", width=14, height=8)
+pdf("results/annotation/05_dotplot_expanded_proof.pdf", width=22, height=8)
 print(DotPlot(seu, features=valid_expanded, cols=c("lightgrey", "blue")) + 
         RotatedAxis() + 
         ggtitle("Expanded Brain Markers (Proof of Annotation)"))
 dev.off()
 cat("  ✔ Saved: results/annotation/05_dotplot_expanded_proof.pdf\n")
 # ==============================================================================
-
-# free space to ram
-
-cat("Saving fully annotated Seurat object...\n")
-saveRDS(seu, "objects/09_seurat_annotated_FINAL.rds")
-cat("✔ Safe to quit!\n")
-
-q(save = "no")
-
-
-#morning reload 
-
-# 1. Load the core libraries
-library(Seurat)
-library(monocle3)
-library(SeuratWrappers)
-library(ggplot2)
-library(dplyr)
-
-# 2. Reload your perfectly annotated data
-cat("Loading Seurat object...\n")
-seu <- readRDS("objects/09_seurat_annotated_FINAL.rds")
-cat("✔ Ready for Step 10!\n")
-
-# === UPDATED STARTUP ===
-library(Seurat)
-library(dplyr)
-library(ggplot2)
-library(patchwork) # Added this so wrap_plots works!
-
-CHOSEN_RES <- 0.6
-N_CORES    <- 10
-N_PCS      <- 15  # Added this so your titles don't error out!
-
-#all library
-suppressPackageStartupMessages({
-  library(Seurat);  library(ggplot2);  library(dplyr);    library(patchwork)
-  library(ggrepel); library(Matrix);   library(GEOquery); library(R.utils)
-  library(harmony); library(DoubletFinder)
-  library(SingleR); library(celldex);  library(DESeq2)
-  library(lisi);    library(monocle3); library(SeuratWrappers)
-})
-
 
 
 
