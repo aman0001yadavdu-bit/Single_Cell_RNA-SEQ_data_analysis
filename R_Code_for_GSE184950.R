@@ -693,37 +693,39 @@ merged <- RunUMAP(merged, reduction="harmony", dims=1:20,
                   verbose=FALSE, reduction.name="umap") %>%
   FindNeighbors(reduction="harmony", dims=1:20, verbose=FALSE) %>%
   FindClusters(resolution=0.5, verbose=FALSE)
-# Upgraded Plot 1: By Sample (After Integration)
+# ── PLOTTING ────────────────────────────────────────────────────────────────
+# Matched width to the previous upgraded plot to keep dimensions consistent
+pdf("results/integration/02_umap_after_integration.pdf", width=18, height=10)
+
+# Plot 1: By Sample (Solid Colors, No Raster Blurring)
 p1 <- DimPlot(merged, 
               group.by = "orig.ident", 
-              pt.size = 0.1, 
-              shuffle = TRUE,    # CRITICAL: Reveals true batch mixing created by Harmony
-              alpha = 0.8) +
+              pt.size = 0.5,        # FIX: Matches the 0.5 from the Before plot
+              shuffle = TRUE,       # CRITICAL: Shows the true batch mixing from Harmony
+              raster = FALSE) +     # FIX: Forces crisp vector points
   ggtitle("AFTER Integration — by Sample") + 
   theme_classic() +
-  NoAxes() +                     # Clean, publication-ready look
+  NoAxes() +                     
   theme(legend.position = "right",
         legend.text = element_text(size = 8)) +
-  # Formats the multi-sample legend into 2 columns with large, visible dots
-  guides(colour = guide_legend(ncol = 2, override.aes = list(size = 3, alpha = 1)))
+  guides(colour = guide_legend(ncol = 2, override.aes = list(size = 3)))
 
-# Upgraded Plot 2: By Disease (After Integration)
+# Plot 2: By Disease (Solid Colors, No Raster Blurring)
 p2 <- DimPlot(merged, 
               group.by = "disease", 
-              pt.size = 0.1, 
-              shuffle = TRUE,    # Ensures disease states aren't hiding each other
-              alpha = 0.8,
+              pt.size = 0.5,        # FIX: Matches the 0.5 from the Before plot
+              shuffle = TRUE,       # Ensures HC and PD cells mix visibly
+              raster = FALSE,       # FIX: Forces crisp vector points
               cols = c("Healthy_Control" = "steelblue", 
                        "Parkinsons_Disease" = "firebrick")) + 
   ggtitle("AFTER Integration — HC vs PD") + 
   theme_classic() +
   NoAxes() +
   theme(legend.position = "right") +
-  # Enlarges the legend dots for easy reading
-  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 1)))
+  guides(colour = guide_legend(override.aes = list(size = 4)))
 
 # Print side-by-side using Patchwork
-print(p1 | p2)
+print(p1 | p2) 
 dev.off()
 
 cat("  ✔ Saved: results/integration/02_umap_after_integration.pdf\n")
