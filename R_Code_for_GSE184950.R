@@ -14,7 +14,7 @@ MAX_FEATURES  <- 3000   # Your conservative doublet filter
 
 MIN_COUNTS    <- 500    # Your chosen signal floor
 
-MAX_MT        <- 50     # Standard limit for healthy brain nuclei
+MAX_MT        <- 20     # Standard limit for healthy brain nuclei
 CHOSEN_RES    <- 0.6    # look at results/clustering/01_umap_all_resolutions.pdf
 # and change this if needed before re-running clustering
 
@@ -282,7 +282,7 @@ dir.create("results/qc", recursive=TRUE, showWarnings=FALSE)
 # Combine briefly just for the "Before" plot
 all_raw <- merge(seurat_raw[[1]], y=seurat_raw[-1], add.cell.ids=names(seurat_raw))
 
-pdf("results/qc/01_combined_violin_before.pdf", width=14, height=5)
+pdf("results/qc/01_combined_violin_before.pdf", width=26, height=7)
 print(VlnPlot(all_raw, features=c("nFeature_RNA","nCount_RNA","percent.mt"),
               ncol=3, pt.size=0, group.by="orig.ident") +
         plot_annotation(title="QC — All Samples BEFORE Filtering",
@@ -290,17 +290,68 @@ print(VlnPlot(all_raw, features=c("nFeature_RNA","nCount_RNA","percent.mt"),
 dev.off()
 cat("  ✔ Saved: results/qc/01_combined_violin_before.pdf\n")
 
+
+############ Generate Before Plot ##############
+
+
+# 1. Process the 'Before QC' merged object
+cat("  Processing Raw Data (This may take a moment due to high cell counts)...\n")
+all_raw <- NormalizeData(all_raw, verbose = FALSE) %>%
+  FindVariableFeatures(verbose = FALSE) %>%
+  ScaleData(verbose = FALSE) %>%
+  RunPCA(verbose = FALSE) %>%
+  RunUMAP(dims = 1:20, verbose = FALSE)
+##################
+p_umap_before <- DimPlot(all_raw, 
+                         reduction = "umap", 
+                         group.by = "orig.ident", 
+                         raster = TRUE,               # Converts the dense points into an image
+                         raster.dpi = c(1024, 1024),  # Keeps the image high resolution
+                         pt.size = 1,                 # Adjust to 2 or 3 if points are too faint
+                         shuffle = TRUE) +            # Prevents the last sample from painting over everything
+  ggtitle("Before QC (Includes Low-Quality Cells)") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+# 3. Save side-by-side comparison to a new PDF
+pdf("results/qc/04_qc_umap_before.pdf", width = 18, height = 10)
+print(p_umap_before)
+dev.off()
+
+
+
+
 # ── FILTERING ───────────────────────────────────────────────────────────────
 # Note: Using your thresholds defined at the top of your script
 cat(sprintf("\n  Filtering: genes %d–%d | MT <%.0f%% | counts >%d\n",
             MIN_FEATURES, MAX_FEATURES, MAX_MT, MIN_COUNTS))
 
-seurat_filtered <- lapply(seurat_raw, function(seu) {
-  subset(seu, subset = nFeature_RNA > MIN_FEATURES &
-           nFeature_RNA < MAX_FEATURES &
-           percent.mt   < MAX_MT       &
-           nCount_RNA   > MIN_COUNTS)
+# Use tryCatch inside lapply to safely handle the "No cells found" error
+seurat_filtered <- lapply(names(seurat_raw), function(sample_name) {
+  seu <- seurat_raw[[sample_name]]
+  
+  tryCatch({
+    # Attempt to subset
+    subset(seu, subset = nFeature_RNA > MIN_FEATURES &
+             nFeature_RNA < MAX_FEATURES &
+             percent.mt   < MAX_MT       &
+             nCount_RNA   > MIN_COUNTS)
+  }, error = function(e) {
+    # If it crashes because 0 cells are found, catch the error, print a warning, and return NULL
+    cat(sprintf("\n ALERT: Sample '%s' dropped to 0 cells after QC. Skipping...\n", sample_name))
+    return(NULL)
+  })
 })
+
+# Reassign the sample names to the list
+names(seurat_filtered) <- names(seurat_raw)
+
+# ── CLEANUP (CRITICAL FOR DOWNSTREAM) ───────────────────────────────────────
+# Identify which samples survived (are not NULL)
+valid_indices <- !sapply(seurat_filtered, is.null)
+
+# Remove the failed samples from BOTH lists so your qc_df generates without crashing
+seurat_filtered <- seurat_filtered[valid_indices]
+seurat_raw <- seurat_raw[valid_indices]
 
 # ── FILTERING SUMMARY ───────────────────────────────────────────────────────
 qc_df <- data.frame(
@@ -316,16 +367,57 @@ cat("\n  --- After QC Summary ---\n")
 print(head(qc_df))
 write.csv(qc_df,"results/qc/qc_summary.csv", row.names=FALSE)
 
+# ============================================================================
+# NEW ADDITION: PURGE EMPTY SAMPLES BEFORE MERGING AND DOWNSTREAM ANALYSIS
+# ============================================================================
+empty_samples <- names(seurat_filtered)[sapply(seurat_filtered, ncol) == 0]
+if(length(empty_samples) > 0) {
+  cat(sprintf("\n⚠️ WARNING: Dropping %d sample(s) with 0 cells after QC: %s\n", 
+              length(empty_samples), paste(empty_samples, collapse=", ")))
+  seurat_filtered <- seurat_filtered[sapply(seurat_filtered, ncol) > 0]
+}
+# ============================================================================
+
 # Plot "After" QC
 all_filt <- merge(seurat_filtered[[1]], y=seurat_filtered[-1], add.cell.ids=names(seurat_filtered))
 
-pdf("results/qc/03_combined_violin_after.pdf", width=14, height=5)
-print(VlnPlot(all_filt, features=c("nFeature_RNA","nCount_RNA","percent.mt"),
+pdf("results/qc/03_combined_violin_after.pdf", width=26, height=7)
+print(VlnPlot(all_filt, features=c("nFeature_RNA","nCount_RNA","percent.mt"), 
               ncol=3, pt.size=0, group.by="orig.ident") +
         plot_annotation(title="QC — All Samples AFTER Filtering",
                         theme=theme(plot.title=element_text(face="bold"))))
 dev.off()
 cat("  ✔ Saved: results/qc/03_combined_violin_after.pdf\n")
+
+rm(seurat_raw,sample_meta,all_raw,clean_meta)
+gc()
+
+############    After umap     #####################
+# 2. Process the 'After QC' merged object
+cat("  Processing Filtered Data...\n")
+all_filt <- NormalizeData(all_filt, verbose = FALSE) %>%
+  FindVariableFeatures(verbose = FALSE) %>%
+  ScaleData(verbose = FALSE) %>%
+  RunPCA(verbose = FALSE) %>%
+  RunUMAP(dims = 1:20, verbose = FALSE)
+
+# Generate After Plot
+p_umap_after <- DimPlot(all_filt, 
+                         reduction = "umap", 
+                         group.by = "orig.ident", 
+                         raster = TRUE,               # Converts the dense points into an image
+                         raster.dpi = c(1024, 1024),  # Keeps the image high resolution
+                         pt.size = 1,                 # Adjust to 2 or 3 if points are too faint
+                         shuffle = TRUE) +            # Prevents the last sample from painting over everything
+  ggtitle("Before QC (Includes Low-Quality Cells)") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+
+# 3. Save side-by-side to a new PDF
+pdf("results/qc/05_qc_umap_after.pdf", width = 18, height = 10)
+print(p_umap_after)
+dev.off()
+
 
 # Save the checkpoint
 dir.create("objects", showWarnings=FALSE)
@@ -345,6 +437,11 @@ seurat_clean <- list()
 for (s in names(seurat_filtered)) {
   cat("  Sample:", s, "\n")
   seu <- seurat_filtered[[s]]
+  
+  if (ncol(seu) < 50) {
+    cat(sprintf("  ⚠️ WARNING: Skipping %s. Only %d cells remaining after QC.\n", s, ncol(seu)))
+    next 
+  }
   
   result <- tryCatch({
     # ── FIX 7: no NormalizeData before — goes straight to standard workflow ────
@@ -404,8 +501,7 @@ dev.off()
 
 # Run garbage collection to return about 11+ GB of RAM to your server
 gc()
-# or bhi cheeje hatani hai yaha par RAM free kanre ke liye 
-
+# or bhi cheeje hatani hai yaha par RAM free kanre ke liye
 
 # ================================================================================
 #  STEP 4: CELL CYCLE SCORING
@@ -538,22 +634,49 @@ merged <- ScaleData(merged,
 # PCA
 merged <- RunPCA(merged, npcs=50, verbose=FALSE)
 # UMAP before integration
+# ── DIMENSIONALITY REDUCTION & CLUSTERING ───────────────────────────────────
+# Fix: Ensure the pipe (%>%) is at the end of the line
 m_before <- RunUMAP(merged, dims=1:20, verbose=FALSE) %>%
   FindNeighbors(dims=1:20, verbose=FALSE) %>%
   FindClusters(resolution=0.5, verbose=FALSE)
 
-pdf("results/integration/01_umap_before_integration.pdf", width=14, height=6)
-p1 <- DimPlot(m_before, group.by="orig.ident", pt.size=0.3) +
-  ggtitle("BEFORE Integration — by Sample") + theme_classic()
-p2 <- DimPlot(m_before, group.by="disease", pt.size=0.3,
-              cols=c(Healthy_Control="steelblue",
-                     Parkinsons_Disease="firebrick")) +
-  ggtitle("BEFORE Integration — HC vs PD") + theme_classic()
-print(p1 + p2)
+# ── PLOTTING ────────────────────────────────────────────────────────────────
+pdf("results/integration/01_umap_before_integration.pdf", width=18, height=10)
+
+# Upgraded Plot 1: By Sample
+p1 <- DimPlot(m_before, 
+              group.by = "orig.ident", 
+              pt.size = 0.1, 
+              shuffle = TRUE,    # CRITICAL: Prevents the last sample from painting over the rest
+              alpha = 0.8) +     # Slight transparency to show density
+  ggtitle("BEFORE Integration — by Sample") + 
+  theme_classic() +
+  NoAxes() +                     # Removes standard x/y lines for a modern, clean look
+  theme(legend.position = "right",
+        legend.text = element_text(size = 8)) +
+  # Formats the massive 33-sample legend into 2 columns with larger dots
+  guides(colour = guide_legend(ncol = 2, override.aes = list(size = 3, alpha = 1)))
+
+# Upgraded Plot 2: By Disease
+p2 <- DimPlot(m_before, 
+              group.by = "disease", 
+              pt.size = 0.1, 
+              shuffle = TRUE,    # Mixes HC and PD dots to show true overlap
+              alpha = 0.8,
+              cols = c("Healthy_Control" = "steelblue", 
+                       "Parkinsons_Disease" = "firebrick")) + 
+  ggtitle("BEFORE Integration — HC vs PD") + 
+  theme_classic() +
+  NoAxes() +
+  theme(legend.position = "right") +
+  # Makes the legend dots larger so they are easy to read
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 1)))
+
+# Print side-by-side using Patchwork
+print(p1 | p2) 
 dev.off()
+
 cat("  ✔ Saved: results/integration/01_umap_before_integration.pdf\n")
-
-
 ######## RAM CLEAN TIME ( IT'S IMPORTANT BABY)###########
 rm(m_before)
 gc()
@@ -570,16 +693,39 @@ merged <- RunUMAP(merged, reduction="harmony", dims=1:20,
                   verbose=FALSE, reduction.name="umap") %>%
   FindNeighbors(reduction="harmony", dims=1:20, verbose=FALSE) %>%
   FindClusters(resolution=0.5, verbose=FALSE)
+# Upgraded Plot 1: By Sample (After Integration)
+p1 <- DimPlot(merged, 
+              group.by = "orig.ident", 
+              pt.size = 0.1, 
+              shuffle = TRUE,    # CRITICAL: Reveals true batch mixing created by Harmony
+              alpha = 0.8) +
+  ggtitle("AFTER Integration — by Sample") + 
+  theme_classic() +
+  NoAxes() +                     # Clean, publication-ready look
+  theme(legend.position = "right",
+        legend.text = element_text(size = 8)) +
+  # Formats the multi-sample legend into 2 columns with large, visible dots
+  guides(colour = guide_legend(ncol = 2, override.aes = list(size = 3, alpha = 1)))
 
-pdf("results/integration/02_umap_after_integration.pdf", width=14, height=6)
-p1 <- DimPlot(merged, group.by="orig.ident", pt.size=0.3) +
-  ggtitle("AFTER Integration — by Sample") + theme_classic()
-p2 <- DimPlot(merged, group.by="disease", pt.size=0.3,
-              cols=c(Healthy_Control="steelblue",
-                     Parkinsons_Disease="firebrick")) +
-  ggtitle("AFTER Integration — HC vs PD") + theme_classic()
-print(p1 + p2)
+# Upgraded Plot 2: By Disease (After Integration)
+p2 <- DimPlot(merged, 
+              group.by = "disease", 
+              pt.size = 0.1, 
+              shuffle = TRUE,    # Ensures disease states aren't hiding each other
+              alpha = 0.8,
+              cols = c("Healthy_Control" = "steelblue", 
+                       "Parkinsons_Disease" = "firebrick")) + 
+  ggtitle("AFTER Integration — HC vs PD") + 
+  theme_classic() +
+  NoAxes() +
+  theme(legend.position = "right") +
+  # Enlarges the legend dots for easy reading
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 1)))
+
+# Print side-by-side using Patchwork
+print(p1 | p2)
 dev.off()
+
 cat("  ✔ Saved: results/integration/02_umap_after_integration.pdf\n")
 
 
@@ -1500,7 +1646,6 @@ cat(sprintf("  Cell types            : %d\n",  length(unique(seu$Manual_CellType
 cat(sprintf("  Pseudobulk DEGs       : %d\n",  n_sig_total))
 cat(sprintf("  Up in PD              : %d\n",  nrow(deg_up)))
 cat(sprintf("  Up in HC              : %d\n\n",nrow(deg_down)))
-
 
 
 # Save final absolute backup
