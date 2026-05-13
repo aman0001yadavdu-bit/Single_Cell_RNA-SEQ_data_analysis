@@ -640,43 +640,43 @@ m_before <- RunUMAP(merged, dims=1:20, verbose=FALSE) %>%
   FindNeighbors(dims=1:20, verbose=FALSE) %>%
   FindClusters(resolution=0.5, verbose=FALSE)
 
-# ── PLOTTING ────────────────────────────────────────────────────────────────
+# ── CORRECTED PLOTTING ──────────────────────────────────────────────────────
 pdf("results/integration/01_umap_before_integration.pdf", width=18, height=10)
 
 # Upgraded Plot 1: By Sample
 p1 <- DimPlot(m_before, 
               group.by = "orig.ident", 
-              pt.size = 0.1, 
-              shuffle = TRUE,    # CRITICAL: Prevents the last sample from painting over the rest
-              alpha = 0.8) +     # Slight transparency to show density
+              pt.size = 0.5,         # FIX 1: Increased from 0.1 for visibility
+              shuffle = TRUE, 
+              raster = FALSE) +      # FIX 2: Forces crisp points, disables blurring
   ggtitle("BEFORE Integration — by Sample") + 
   theme_classic() +
-  NoAxes() +                     # Removes standard x/y lines for a modern, clean look
+  NoAxes() + 
   theme(legend.position = "right",
         legend.text = element_text(size = 8)) +
-  # Formats the massive 33-sample legend into 2 columns with larger dots
-  guides(colour = guide_legend(ncol = 2, override.aes = list(size = 3, alpha = 1)))
+  guides(colour = guide_legend(ncol = 2, override.aes = list(size = 3))) # Removed alpha
 
 # Upgraded Plot 2: By Disease
 p2 <- DimPlot(m_before, 
               group.by = "disease", 
-              pt.size = 0.1, 
-              shuffle = TRUE,    # Mixes HC and PD dots to show true overlap
-              alpha = 0.8,
+              pt.size = 0.5,         # FIX 1: Increased from 0.1
+              shuffle = TRUE, 
+              raster = FALSE,        # FIX 2: Forces crisp points
               cols = c("Healthy_Control" = "steelblue", 
                        "Parkinsons_Disease" = "firebrick")) + 
   ggtitle("BEFORE Integration — HC vs PD") + 
   theme_classic() +
   NoAxes() +
   theme(legend.position = "right") +
-  # Makes the legend dots larger so they are easy to read
-  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 1)))
+  guides(colour = guide_legend(override.aes = list(size = 4))) # Removed alpha
 
 # Print side-by-side using Patchwork
 print(p1 | p2) 
 dev.off()
 
 cat("  ✔ Saved: results/integration/01_umap_before_integration.pdf\n")
+
+                             
 ######## RAM CLEAN TIME ( IT'S IMPORTANT BABY)###########
 rm(m_before)
 gc()
