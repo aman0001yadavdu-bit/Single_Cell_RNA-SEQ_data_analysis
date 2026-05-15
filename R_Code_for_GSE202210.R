@@ -944,41 +944,9 @@ cat("  ✔ Saved: results/annotation/02_umap_singler_majority.pdf\n")
 # 10. Known Markers DotPlot (Verification Step)
 cat("  Generating DotPlot of brain-specific known markers...\n")
 known_markers <- c(
-  # 1 Astrocytes
-  "GFAP", "AQP4", "ALDH1L1",
-  
-  # 2 Microglia
-  "CX3CR1", "C1QA", "TREM2",
-  
-  # 3 Oligodendrocytes
-  "MBP", "PLP1", "MOG",
-  
-  # 4 Oligodendrocyte Precursor Cells (OPCs)
-  "PDGFRA", "CSPG4", "SOX10",
-  
-  # 5 Endothelial cells
-  "PECAM1", "CLDN5", "FLT1",
-  
-  # 6 Pericytes
-  "PDGFRB", "VTN", "RGS5",
-  
-  # 7 Ependymal cells
-  "FOXJ1", "CCDC39", "PIFO",
-  
-  # 8 Pan-Neurons
-  "RBFOX3", "SNAP25", "MAP2",
-  
-  # 9 Glutamatergic (Excitatory) neurons
-  "SLC17A7", "CAMK2A", "GRIN1",
-  
-  # 10 GABAergic (Inhibitory) neurons
-  "GAD1", "GAD2", "PVALB",
-  
-  # 11 Dopaminergic neurons
-  "TH", "SLC6A3", "DDC",
-  
-  # 12 T cells (Included to check for peripheral immune infiltration)
-  "CD3D", "CD3E", "IL7R"
+ "HERC2P4", "LOC102723753", "LINC02908", "NDST4", "SLC6A3", "SLC18A2",
+  "CHI3L1", "CCR5", "SHISA3", "FPR2", "GBP2", "OR7A5", "MKI67", "PLA1A", 
+  "BCL2A1", "C1QB", "ALK", "MUC3A", "HHATL"
 )
 # Ensure we only plot genes that actually exist to prevent errors
 valid_markers <- intersect(known_markers, rownames(seu))
@@ -990,6 +958,54 @@ print(DotPlot(seu, features=valid_markers, cols=c("lightgrey", "red")) +
 dev.off()
 cat("  ✔ Saved: results/annotation/03_dotplot_known_markers.pdf\n")
 # ==============================================================================
+
+
+         
+# ==============================================================================
+#  STEP 10.2: VISUALIZE ANNOTATIONS (DotPlot & Heatmap)
+# ==============================================================================
+cat("  Setting cell identities to annotated labels...\n")
+# Switch the active identity from cluster numbers to the SingleR labels
+Idents(seu) <- "SingleR_Majority"
+
+known_markers <- c(
+  "HERC2P4", "LOC102723753", "LINC02908", "NDST4", "SLC6A3", "SLC18A2",
+  "CHI3L1", "CCR5", "SHISA3", "FPR2", "GBP2", "OR7A5", "MKI67", "PLA1A", 
+  "BCL2A1", "C1QB", "ALK", "MUC3A", "HHATL"
+)
+
+# Ensure we only plot genes that actually exist to prevent errors
+valid_markers <- intersect(known_markers, rownames(seu))
+
+# --- DotPlot ---
+cat("  Generating DotPlot with annotated labels...\n")
+pdf("results/annotation/03_dotplot_known_markers.pdf", width=22, height=10)
+print(DotPlot(seu, features=valid_markers, cols=c("lightgrey", "red")) + 
+        RotatedAxis() + 
+        ggtitle("Expression of RNA-seq gene markers per Cell Type"))
+dev.off()
+cat("  ✔ Saved: results/annotation/03_dotplot_known_markers.pdf\n")
+
+# --- Heatmap ---
+cat("  Scaling data for Heatmap and generating plot...\n")
+# Scale the specific markers so DoHeatmap can render them properly
+seu <- ScaleData(seu, features = valid_markers, verbose = FALSE)
+
+pdf("results/annotation/04_heatmap_known_markers.pdf", width=26, height=14)
+# Using raster=FALSE ensures high resolution if you have a lot of cells, 
+# though you can set it to TRUE if the PDF file size becomes too large.
+print(DoHeatmap(seu, features=valid_markers, size=4, angle=90) + 
+        ggtitle("Heatmap of RNA-seq gene markers per Cell Type") +
+        theme(axis.text.y = element_text(size = 12))) 
+dev.off()
+cat("  ✔ Saved: results/annotation/04_heatmap_known_markers.pdf\n")
+# ==============================================================================
+
+
+
+
+
+         
 # 1. Extend timeout again just in case
 options(timeout = 600)
 
