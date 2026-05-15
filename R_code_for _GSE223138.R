@@ -12,9 +12,7 @@ MIN_FEATURES  <- 200
 MAX_FEATURES  <- 6000
 MAX_MT        <- 20
 MIN_COUNTS    <- 500
-CHOSEN_RES    <- 0.6    # look at results/clustering/01_umap_all_resolutions.pdf
-# and change this if needed before re-running clustering
-
+CHOSEN_RES    <- 0.6    
 
 suppressPackageStartupMessages({
   library(Seurat);  library(ggplot2);  library(dplyr);    library(patchwork)
@@ -163,14 +161,13 @@ print(data.frame(geo_id  = names(disease_map),
 GEO_ACCESSION <- "GSE223138"
 N_CORES       <- 10
 
-MIN_FEATURES  <- 300    # Your chosen floor
-MAX_FEATURES  <- 3000   # Your conservative doublet filter
+MIN_FEATURES  <- 300    
+MAX_FEATURES  <- 3000   
 
-MIN_COUNTS    <- 300    # Your chosen signal floor
+MIN_COUNTS    <- 300    
 
-MAX_MT        <- 10     # Standard limit for healthy brain nuclei
-CHOSEN_RES    <- 0.6    # look at results/clustering/01_umap_all_resolutions.pdf
-# and change this if needed before re-running clustering
+MAX_MT        <- 10     
+CHOSEN_RES    <- 0.6   
 
 # ================================================================================
 #  STEP 2: LOAD DATA + QUALITY CONTROL
@@ -393,9 +390,6 @@ p_combined_before <- DimPlot(combined_before, group.by="doublet_status",
   theme_classic()
 
 # 4. Create the 'After' Plot 
-# We subset the merged object here instead of merging 'seurat_clean'. 
-# This guarantees the UMAP coordinates stay exactly the same, 
-# so you just see the red dots disappear!
 combined_after <- subset(combined_before, subset = doublet_status == "Singlet")
 
 p_combined_after <- DimPlot(combined_after, group.by="doublet_status", 
@@ -456,7 +450,7 @@ cat("✔ Cell cycle scoring done.\n\n")
 
 # ================================================================================
 #  STEP 5: NORMALIZATION (Log-norm per sample)
-#  FIX 4: Using log-normalization + Harmony only
+#  Using log-normalization + Harmony only
 #  NOT SCTransform + Harmony (which over-stacks corrections)
 #  SCTransform is good but should not be combined with Harmony
 #  Log-norm + Harmony is the standard validated approach
@@ -505,7 +499,7 @@ gc()
 
 # ================================================================================
 #  STEP 6: MERGE + HARMONY INTEGRATION
-#  Corrects batch effects between the 12 samples
+#  Corrects batch effects between samples
 # ================================================================================
 cat("━━━ STEP 6: Merge + Harmony Integration ━━━\n")
 
@@ -729,7 +723,7 @@ saveRDS(merged, "objects/07_integrated_checkpoint.rds")
 # Confirm it saved
 cat("✔ Step 7 Save Point created: objects/07_integrated_checkpoint.rds\n")
 
-#clean slate
+# Gadi wala aaya ghar se kachra nikal 
 
 # Force the server to reclaim the RAM
 gc()
